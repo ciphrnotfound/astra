@@ -1,0 +1,9 @@
+ [package]
+ name = "codex-cli"
+ version = "0.1.0"
+ edition = "2021"
+ 
+ [dependencies]
+ codex-core = { path = "../core" }
+ clap = { version = "4", features = ["derive"] }
+ anyhow = "1"

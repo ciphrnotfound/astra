@@ -1,0 +1,9 @@
+ [workspace]
+ members = [
+     "core",
+     "lsp",
+     "hooks",
+     "tui",
+     "cli",
+ ]
+ resolver = "2"
