@@ -1,0 +1,453 @@
+// TODO: use std::fmt::Write as FmtWrite;
+// TODO: use std::fs;
+// TODO: use std::path::{Path, PathBuf};
+
+// TODO: use anyhow::Result;
+
+// TODO: use super::detect::{discover_source_files, Language};
+// TODO: use super::scaffold::scaffold_project;
+// TODO: use super::translate::{HybridTranslator, Translator};
+// TODO: use crate::model::CodexModel;
+// TODO: use crate::parser::{parse_rust_file, RustSymbolKind};
+
+// // ---------------------------------------------------------------------------
+// // Config & result types
+// // ---------------------------------------------------------------------------
+
+export interface MigrationConfig {
+  source_dir: any;
+  output_dir: any;
+  from_lang: any;
+  to_lang: any;
+  use_ai: boolean;
+}
+
+
+export interface MigrationResult {
+  migrated: any[];
+  skipped: any[];
+  errors: any[];
+  scaffold_log: string;
+  plan_text: string;
+}
+
+
+export interface GeneratedTests {
+  files: any[];
+}
+
+
+export interface MigratedFile {
+  source: any;
+  output: any;
+  lines: number;
+}
+
+
+export interface SkippedFile {
+  path: any;
+  reason: string;
+}
+
+
+export interface MigrationError {
+  path: any;
+  error: string;
+}
+
+
+// impl MigrationResult {
+// /// Summarize the result as a human-readable string.
+export function summary(&self: any): string {
+  // let mut s = String::new();
+  // let _ = writeln!(&mut s, "\n━━━ MIGRATION COMPLETE ━━━");
+  // let _ = writeln!(&mut s, "  ✓ Migrated : {} files", self.migrated.len());
+  // if !self.skipped.is_empty() {
+  // let _ = writeln!(&mut s, "  ⊘ Skipped  : {} files", self.skipped.len());
+  // }
+  // if !self.errors.is_empty() {
+  // let _ = writeln!(&mut s, "  ✗ Errors   : {} files", self.errors.len());
+  // }
+  // let total_lines: usize = self.migrated.iter().map(|f| f.lines).sum();
+  // let _ = writeln!(&mut s, "  ◎ Lines    : {}", total_lines);
+  // 
+  // if !self.errors.is_empty() {
+  // let _ = writeln!(&mut s, "\nErrors:");
+  // for e in &self.errors {
+  // let _ = writeln!(&mut s, "  {:?}: {}", e.path, e.error);
+  // }
+  // }
+  // s
+}
+
+// }
+
+// // ---------------------------------------------------------------------------
+// // Main migration entry point
+// // ---------------------------------------------------------------------------
+
+// pub fn run_migration(
+
+// config: &MigrationConfig,
+// model: Option<&(dyn CodexModel + Send + Sync)>,
+// ) -> Result<MigrationResult> {
+// let mut plan_text = String::new();
+
+// let _ = writeln!(
+// &mut plan_text,
+// "Migration plan: {} → {}",
+// config.from_lang, config.to_lang
+// );
+
+// // 1. Discover source files
+// let source_files = discover_source_files(&config.source_dir, config.from_lang);
+
+// if source_files.is_empty() {
+// return Ok(MigrationResult {
+// migrated: Vec::new(),
+// skipped: Vec::new(),
+// errors: vec![MigrationError {
+// path: config.source_dir.clone(),
+// error: format!(
+// "No {} files found in {:?}",
+// config.from_lang, config.source_dir
+// ),
+// }],
+// scaffold_log: String::new(),
+// plan_text,
+// });
+// }
+
+// let total_lines: usize = source_files
+// .iter()
+// .filter_map(|p| fs::read_to_string(p).ok())
+// .map(|c| c.lines().count())
+// .sum();
+
+// let _ = writeln!(
+// &mut plan_text,
+// "Found {} source files (approx {} lines) in {:?}",
+// source_files.len(),
+// total_lines,
+// config.source_dir
+// );
+
+// if config.from_lang == Language::Rust {
+// let _ = writeln!(&mut plan_text);
+// let _ = writeln!(&mut plan_text, "Key Rust modules:");
+// for path in source_files.iter().take(5) {
+// if let Ok(contents) = fs::read_to_string(path) {
+// if let Ok(symbols) = parse_rust_file(path, &contents) {
+// if symbols.is_empty() {
+// continue;
+// }
+// let _ = writeln!(&mut plan_text, "  {:?}:", path);
+// for sym in symbols.iter().take(8) {
+// let kind = match sym.kind {
+// RustSymbolKind::Struct => "struct",
+// RustSymbolKind::Enum => "enum",
+// RustSymbolKind::Function => "fn",
+// };
+// let _ = writeln!(&mut plan_text, "    {} {}", kind, sym.name);
+// }
+// }
+// }
+// }
+// }
+
+// let _ = writeln!(&mut plan_text);
+// let _ = writeln!(&mut plan_text, "Steps:");
+// let _ = writeln!(
+// &mut plan_text,
+// "  1. Scaffold a new {} project at {:?}",
+// config.to_lang, config.output_dir
+// );
+// let _ = writeln!(
+// &mut plan_text,
+// "  2. Translate all {} source files into {}",
+// config.from_lang, config.to_lang
+// );
+// let _ = writeln!(
+// &mut plan_text,
+// "  3. Generate basic {} tests for migrated modules",
+// config.to_lang
+// );
+// let _ = writeln!(
+// &mut plan_text,
+// "  4. Write a MIGRATION_REPORT.md summarizing files and any issues"
+// );
+
+// // 2. Scaffold the output project
+// let scaffold_log = scaffold_project(&config.output_dir, config.to_lang)?;
+
+// // 3. Build the translator
+// let translator = if config.use_ai {
+// HybridTranslator::new(model)
+// } else {
+// HybridTranslator::new(None)
+// };
+
+// // 4. Walk each file and translate
+// let mut migrated = Vec::new();
+// let mut skipped = Vec::new();
+// let mut errors = Vec::new();
+
+// // Determine the src sub-directory to place translated files
+// let src_subdir = match config.to_lang {
+// Language::Rust => config.output_dir.join("src"),
+// Language::Go => config.output_dir.clone(),
+// Language::Python => config.output_dir.join("src"),
+// Language::TypeScript => config.output_dir.join("src"),
+// Language::JavaScript => config.output_dir.join("src"),
+// Language::Java => config
+// .output_dir
+// .join("src")
+// .join("main")
+// .join("java"),
+// };
+// fs::create_dir_all(&src_subdir)?;
+
+// for source_path in &source_files {
+// // Map source path to output path
+// let relative = match source_path.strip_prefix(&config.source_dir) {
+// Ok(r) => r,
+// Err(_) => {
+// skipped.push(SkippedFile {
+// path: source_path.clone(),
+// reason: "Could not compute relative path".to_string(),
+// });
+// continue;
+// }
+// };
+
+// let output_path = map_output_path(&src_subdir, relative, config.to_lang);
+
+// // Read source
+// let source_code = match fs::read_to_string(source_path) {
+// Ok(c) => c,
+// Err(e) => {
+// errors.push(MigrationError {
+// path: source_path.clone(),
+// error: format!("Failed to read: {}", e),
+// });
+// continue;
+// }
+// };
+
+// if source_code.trim().is_empty() {
+// skipped.push(SkippedFile {
+// path: source_path.clone(),
+// reason: "Empty file".to_string(),
+// });
+// continue;
+// }
+
+// // Translate
+// match translator.translate(&source_code, config.from_lang, config.to_lang) {
+// Ok(translated) => {
+// let lines = translated.lines().count();
+
+// // Create parent dirs
+// if let Some(parent) = output_path.parent() {
+// fs::create_dir_all(parent).ok();
+// }
+
+// // Write
+// if let Err(e) = fs::write(&output_path, &translated) {
+// errors.push(MigrationError {
+// path: source_path.clone(),
+// error: format!("Failed to write: {}", e),
+// });
+// continue;
+// }
+
+// migrated.push(MigratedFile {
+// source: source_path.clone(),
+// output: output_path,
+// lines,
+// });
+// }
+// Err(e) => {
+// errors.push(MigrationError {
+// path: source_path.clone(),
+// error: format!("Translation failed: {}", e),
+// });
+// }
+// }
+// }
+
+// // 5. Update the Rust lib.rs if target is Rust (add mod declarations)
+// if config.to_lang == Language::Rust {
+// update_rust_lib_rs(&config.output_dir, &migrated);
+// }
+
+// // 6. Optionally generate tests using the model
+// if let Some(m) = model {
+// generate_ai_tests(m, config, &migrated).ok();
+// }
+
+// // 7. Write migration report
+// write_migration_report(&config.output_dir, config, &migrated, &skipped, &errors);
+
+// Ok(MigrationResult {
+// migrated,
+// skipped,
+// errors,
+// scaffold_log,
+// plan_text,
+// })
+// }
+
+// fn generate_ai_tests(
+
+// model: &(dyn CodexModel + Send + Sync),
+// config: &MigrationConfig,
+// migrated: &[MigratedFile],
+// ) -> Result<GeneratedTests> {
+// let mut created = Vec::new();
+
+// for file in migrated {
+// let code = match fs::read_to_string(&file.output) {
+// Ok(c) => c,
+// Err(_) => continue,
+// };
+
+// let request = format!(
+// "You are an expert test writer.\n\
+// Write tests for the following {} code that capture its intent.\n\
+// Rules:\n\
+// - Use idiomatic {}\n\
+// - Focus on edge cases and failure modes\n\
+// - Output only test code, no explanations\n\n\
+// Source code:\n{}\n",
+// config.to_lang, config.to_lang, code
+// );
+
+// let tests = model.complete(&request)?;
+
+// let test_path = match config.to_lang {
+// Language::Rust => {
+// let mut p = file.output.clone();
+// let name = match p.file_stem().and_then(|s| s.to_str()) {
+// Some(n) => format!("{}_tests.rs", n),
+// None => "generated_tests.rs".to_string(),
+// };
+// p.set_file_name(name);
+// p
+// }
+// Language::Python => {
+// let mut p = config.output_dir.join("tests");
+// let name = match file.output.file_stem().and_then(|s| s.to_str()) {
+// Some(n) => format!("test_{}.py", n),
+// None => "test_generated.py".to_string(),
+// };
+// p.push(name);
+// p
+// }
+// Language::Go => {
+// let mut p = file.output.clone();
+// let name = match p.file_stem().and_then(|s| s.to_str()) {
+// Some(n) => format!("{}_test.go", n),
+// None => "generated_test.go".to_string(),
+// };
+// p.set_file_name(name);
+// p
+// }
+// _ => continue,
+// };
+
+// if let Some(parent) = test_path.parent() {
+// fs::create_dir_all(parent).ok();
+// }
+
+// if fs::write(&test_path, tests).is_ok() {
+// created.push(test_path);
+// }
+// }
+
+// Ok(GeneratedTests { files: created })
+// }
+
+// // ---------------------------------------------------------------------------
+// // Helpers
+// // ---------------------------------------------------------------------------
+
+export function map_output_path(src_subdir: any, relative: any, to_lang: any): any {
+  // let stem = relative.file_stem().unwrap_or_default();
+  // let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+  // 
+  // let new_ext = to_lang.target_extension();
+  // let new_name = format!("{}.{}", stem.to_string_lossy(), new_ext);
+  // 
+  // src_subdir.join(parent).join(new_name)
+}
+
+
+export function update_rust_lib_rs(output_dir: any, migrated: any[]): void {
+  // let lib_path = output_dir.join("src").join("lib.rs");
+  // let mut content = String::from("// Auto-generated by codex migrate\n\n");
+  // 
+  // for file in migrated {
+  // if let Some(stem) = file.output.file_stem() {
+  // let mod_name = stem.to_string_lossy();
+  // if mod_name != "lib" && mod_name != "main" {
+  // content.push_str(&format!("pub mod {};\n", mod_name));
+  // }
+  // }
+  // }
+  // 
+  // fs::write(lib_path, content).ok();
+}
+
+
+// fn write_migration_report(
+
+// output_dir: &Path,
+// config: &MigrationConfig,
+// migrated: &[MigratedFile],
+// skipped: &[SkippedFile],
+// errors: &[MigrationError],
+// ) {
+// let mut report = String::new();
+// let _ = writeln!(&mut report, "# Migration Report");
+// let _ = writeln!(&mut report);
+// let _ = writeln!(
+// &mut report,
+// "- **From**: {} (`{:?}`)",
+// config.from_lang, config.source_dir
+// );
+// let _ = writeln!(
+// &mut report,
+// "- **To**: {} (`{:?}`)",
+// config.to_lang, config.output_dir
+// );
+// let _ = writeln!(&mut report, "- **AI-assisted**: {}", config.use_ai);
+// let _ = writeln!(&mut report);
+
+// let _ = writeln!(&mut report, "## Migrated Files ({}):", migrated.len());
+// for f in migrated {
+// let _ = writeln!(
+// &mut report,
+// "- `{:?}` → `{:?}` ({} lines)",
+// f.source, f.output, f.lines
+// );
+// }
+
+// if !skipped.is_empty() {
+// let _ = writeln!(&mut report);
+// let _ = writeln!(&mut report, "## Skipped ({}):", skipped.len());
+// for f in skipped {
+// let _ = writeln!(&mut report, "- `{:?}`: {}", f.path, f.reason);
+// }
+// }
+
+// if !errors.is_empty() {
+// let _ = writeln!(&mut report);
+// let _ = writeln!(&mut report, "## Errors ({}):", errors.len());
+// for e in errors {
+// let _ = writeln!(&mut report, "- `{:?}`: {}", e.path, e.error);
+// }
+// }
+
+// fs::write(output_dir.join("MIGRATION_REPORT.md"), report).ok();
+// }

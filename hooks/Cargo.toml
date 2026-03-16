@@ -1,7 +1,7 @@
- [package]
- name = "codex-hooks"
+[package]
+name = "astra-hooks"
  version = "0.1.0"
  edition = "2021"
  
  [dependencies]
- codex-core = { path = "../core" }
+astra-core = { path = "../core" }

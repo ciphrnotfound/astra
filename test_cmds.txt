@@ -1,0 +1,4 @@
+:index
+:deps anyhow
+:imports core/src/index.rs
+:exit

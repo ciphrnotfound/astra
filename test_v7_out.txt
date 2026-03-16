@@ -1,0 +1,24 @@
+warning: variant `References` is never constructed
+   --> core\src\index.rs:206:5
+    |
+203 | enum GraphEdge {
+    |      --------- variant in this enum
+...
+206 |     References,
+    |     ^^^^^^^^^^
+    |
+    = note: `GraphEdge` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `HIGH_RISK_PATTERNS` is never used
+  --> core\src\security.rs:21:7
+   |
+21 | const HIGH_RISK_PATTERNS: &...
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: `astra-core` (lib) generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.96s
+     Running `target\debug\test_v7.exe`
+Index dependencies:
+index.rs imports: ["std::collections", "std::fmt", "std::path", "petgraph::graph", "petgraph::visit", "crate::parser"]
+Files depending on 'persona': ["core/src\\engine.rs"]

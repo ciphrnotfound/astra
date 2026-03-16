@@ -7,8 +7,9 @@ use anyhow::Result;
 use super::detect::{discover_source_files, Language};
 use super::scaffold::scaffold_project;
 use super::translate::{HybridTranslator, Translator};
+use super::clean::CleanupEngine;
 use crate::model::CodexModel;
-use crate::parser::{parse_rust_file, RustSymbolKind};
+use crate::parser::{parse_rust_file, ParsedSymbolKind};
 
 // ---------------------------------------------------------------------------
 // Config & result types
@@ -20,6 +21,8 @@ pub struct MigrationConfig {
     pub from_lang: Language,
     pub to_lang: Language,
     pub use_ai: bool,
+    pub use_clean: bool,
+    pub knowledge: Option<String>,
 }
 
 pub struct MigrationResult {
@@ -85,6 +88,19 @@ pub fn run_migration(
 ) -> Result<MigrationResult> {
     let mut plan_text = String::new();
 
+    if config.from_lang == config.to_lang {
+        return Ok(MigrationResult {
+            migrated: Vec::new(),
+            skipped: Vec::new(),
+            errors: vec![MigrationError {
+                path: config.source_dir.clone(),
+                error: "Source and target languages must be different.".to_string(),
+            }],
+            scaffold_log: String::new(),
+            plan_text: "Migration aborted: source and target languages are the same.".to_string(),
+        });
+    }
+
     let _ = writeln!(
         &mut plan_text,
         "Migration plan: {} → {}",
@@ -136,9 +152,13 @@ pub fn run_migration(
                     let _ = writeln!(&mut plan_text, "  {:?}:", path);
                     for sym in symbols.iter().take(8) {
                         let kind = match sym.kind {
-                            RustSymbolKind::Struct => "struct",
-                            RustSymbolKind::Enum => "enum",
-                            RustSymbolKind::Function => "fn",
+                            ParsedSymbolKind::Struct => "struct",
+                            ParsedSymbolKind::Enum => "enum",
+                            ParsedSymbolKind::Function => "fn",
+                            ParsedSymbolKind::Class => "class",
+                            ParsedSymbolKind::Interface => "interface",
+                            ParsedSymbolKind::Type => "type",
+                            ParsedSymbolKind::Constant => "const",
                         };
                         let _ = writeln!(&mut plan_text, "    {} {}", kind, sym.name);
                     }
@@ -169,14 +189,28 @@ pub fn run_migration(
         "  4. Write a MIGRATION_REPORT.md summarizing files and any issues"
     );
 
+    let use_ai_effective = if config.use_ai {
+        if model.is_some() {
+            true
+        } else {
+            let _ = writeln!(
+                &mut plan_text,
+                "AI requested but no model is configured; falling back to rule-based translation."
+            );
+            false
+        }
+    } else {
+        false
+    };
+
     // 2. Scaffold the output project
     let scaffold_log = scaffold_project(&config.output_dir, config.to_lang)?;
 
     // 3. Build the translator
-    let translator = if config.use_ai {
-        HybridTranslator::new(model)
+    let translator = if use_ai_effective {
+        HybridTranslator::new(model, config.knowledge.clone())
     } else {
-        HybridTranslator::new(None)
+        HybridTranslator::new(None, None)
     };
 
     // 4. Walk each file and translate
@@ -196,6 +230,7 @@ pub fn run_migration(
             .join("src")
             .join("main")
             .join("java"),
+        Language::React | Language::NextJs | Language::Vue | Language::Svelte => config.output_dir.join("src"),
     };
     fs::create_dir_all(&src_subdir)?;
 
@@ -253,6 +288,16 @@ pub fn run_migration(
                     continue;
                 }
 
+                // Cleanup if requested
+                if config.use_clean {
+                    if let Some(m) = model {
+                        let cleaner = CleanupEngine::new(m);
+                        if let Ok((cleaned, _smells)) = cleaner.clean(&translated, config.to_lang) {
+                            let _ = fs::write(&output_path, &cleaned);
+                        }
+                    }
+                }
+
                 migrated.push(MigratedFile {
                     source: source_path.clone(),
                     output: output_path,
@@ -274,8 +319,10 @@ pub fn run_migration(
     }
 
     // 6. Optionally generate tests using the model
-    if let Some(m) = model {
+    if use_ai_effective {
+        if let Some(m) = model {
         generate_ai_tests(m, config, &migrated).ok();
+        }
     }
 
     // 7. Write migration report
@@ -368,18 +415,22 @@ fn map_output_path(src_subdir: &Path, relative: &Path, to_lang: Language) -> Pat
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
 
     let new_ext = to_lang.target_extension();
-    let new_name = format!("{}.{}", stem.to_string_lossy(), new_ext);
+    let new_name = if to_lang == Language::Rust {
+        format!("{}.{}", sanitize_rust_module_name(&stem.to_string_lossy()), new_ext)
+    } else {
+        format!("{}.{}", stem.to_string_lossy(), new_ext)
+    };
 
     src_subdir.join(parent).join(new_name)
 }
 
 fn update_rust_lib_rs(output_dir: &Path, migrated: &[MigratedFile]) {
     let lib_path = output_dir.join("src").join("lib.rs");
-    let mut content = String::from("// Auto-generated by codex migrate\n\n");
+    let mut content = String::from("// Auto-generated by astra migrate\n\n");
 
     for file in migrated {
         if let Some(stem) = file.output.file_stem() {
-            let mod_name = stem.to_string_lossy();
+            let mod_name = sanitize_rust_module_name(&stem.to_string_lossy());
             if mod_name != "lib" && mod_name != "main" {
                 content.push_str(&format!("pub mod {};\n", mod_name));
             }
@@ -387,6 +438,24 @@ fn update_rust_lib_rs(output_dir: &Path, migrated: &[MigratedFile]) {
     }
 
     fs::write(lib_path, content).ok();
+}
+
+fn sanitize_rust_module_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        return "_module".to_string();
+    }
+    if out.chars().next().unwrap_or('_').is_ascii_digit() {
+        out.insert(0, '_');
+    }
+    out
 }
 
 fn write_migration_report(

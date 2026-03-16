@@ -1,0 +1,32 @@
+# Migration Report
+
+- **From**: Rust (`"core/src"`)
+- **To**: Go (`"out_go_v5"`)
+- **AI-assisted**: true
+
+## Migrated Files (25):
+- `"core/src\\engine.rs"` → `"out_go_v5\\engine.go"` (1033 lines)
+- `"core/src\\generated\\sample.rs"` → `"out_go_v5\\generated\\sample.go"` (20 lines)
+- `"core/src\\git.rs"` → `"out_go_v5\\git.go"` (285 lines)
+- `"core/src\\health.rs"` → `"out_go_v5\\health.go"` (291 lines)
+- `"core/src\\index.rs"` → `"out_go_v5\\index.go"` (532 lines)
+- `"core/src\\lib.rs"` → `"out_go_v5\\lib.go"` (79 lines)
+- `"core/src\\memory.rs"` → `"out_go_v5\\memory.go"` (249 lines)
+- `"core/src\\migrate\\clean.rs"` → `"out_go_v5\\migrate\\clean.go"` (111 lines)
+- `"core/src\\migrate\\detect.rs"` → `"out_go_v5\\migrate\\detect.go"` (203 lines)
+- `"core/src\\migrate\\mapping.rs"` → `"out_go_v5\\migrate\\mapping.go"` (94 lines)
+- `"core/src\\migrate\\mod.rs"` → `"out_go_v5\\migrate\\mod.go"` (101 lines)
+- `"core/src\\migrate\\orchestrate.rs"` → `"out_go_v5\\migrate\\orchestrate.go"` (366 lines)
+- `"core/src\\migrate\\scaffold.rs"` → `"out_go_v5\\migrate\\scaffold.go"` (257 lines)
+- `"core/src\\migrate\\translate.rs"` → `"out_go_v5\\migrate\\translate.go"` (1147 lines)
+- `"core/src\\migration.rs"` → `"out_go_v5\\migration.go"` (55 lines)
+- `"core/src\\migration_example.rs"` → `"out_go_v5\\migration_example.go"` (24 lines)
+- `"core/src\\model.rs"` → `"out_go_v5\\model.go"` (314 lines)
+- `"core/src\\parser.rs"` → `"out_go_v5\\parser.go"` (166 lines)
+- `"core/src\\persona.rs"` → `"out_go_v5\\persona.go"` (189 lines)
+- `"core/src\\query.rs"` → `"out_go_v5\\query.go"` (12 lines)
+- `"core/src\\scaffold.rs"` → `"out_go_v5\\scaffold.go"` (60 lines)
+- `"core/src\\security.rs"` → `"out_go_v5\\security.go"` (199 lines)
+- `"core/src\\teams.rs"` → `"out_go_v5\\teams.go"` (422 lines)
+- `"core/src\\time_travel.rs"` → `"out_go_v5\\time_travel.go"` (125 lines)
+- `"core/src\\ts_migrate.rs"` → `"out_go_v5\\ts_migrate.go"` (166 lines)

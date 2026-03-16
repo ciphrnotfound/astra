@@ -1,0 +1,48 @@
+────────────────────────────────────────
+ codex v0.1.0 — conversational CLI
+────────────────────────────────────────
+Type what you want, like:
+  migrate core/src from rs to ts into ./out --ai
+  show project summary
+  what do you remember about this repo?
+
+
+› 𝙘𝙤𝙙𝙚𝙭 › Indexed 158 files with a total of 32550 lines. Ingested 1 historical Git commits into memory.
+
+› 𝙘𝙤𝙙𝙚𝙭 › astra did not understand this yet:
+  :deps anyhow
+
+Try one of:
+  :index
+  :summary
+  :memory
+  :web <query>       — search the web and remember
+  :learn <language>  — research a language's best practices
+  :migrate <src> <from> <to> <out> [--ai]
+  ? <question>
+
+› 𝙘𝙤𝙙𝙚𝙭 › astra did not understand this yet:
+  :imports core/src/index.rs
+
+Try one of:
+  :index
+  :summary
+  :memory
+  :web <query>       — search the web and remember
+  :learn <language>  — research a language's best practices
+  :migrate <src> <from> <to> <out> [--ai]
+  ? <question>
+
+› 𝙘𝙤𝙙𝙚𝙭 › astra did not understand this yet:
+  :exit
+
+Try one of:
+  :index
+  :summary
+  :memory
+  :web <query>       — search the web and remember
+  :learn <language>  — research a language's best practices
+  :migrate <src> <from> <to> <out> [--ai]
+  ? <question>
+
+› 

@@ -16,6 +16,13 @@ pub struct CommitSummary {
     pub time: i64,
 }
 
+pub struct CommitInfo {
+    pub id: String,
+    pub summary: String,
+    pub author: String,
+    pub date: String,
+}
+
 impl GitRepo {
     pub fn discover(root: &Path) -> Result<Self> {
         let repo = Repository::discover(root)?;
@@ -39,12 +46,52 @@ impl GitRepo {
         revwalk.take(limit).count()
     }
 
+    pub fn total_commit_count(&self) -> usize {
+        let mut revwalk = match self.repo.revwalk() {
+            Ok(rw) => rw,
+            Err(_) => return 0,
+        };
+        if revwalk.push_head().is_err() {
+            return 0;
+        }
+        revwalk.count()
+    }
+
     pub fn uncommitted_file_count(&self) -> usize {
         let statuses = match self.repo.statuses(None) {
             Ok(s) => s,
             Err(_) => return 0,
         };
         statuses.len()
+    }
+
+    pub fn changed_files(&self) -> Vec<String> {
+        let statuses = match self.repo.statuses(None) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mut files = Vec::new();
+        for entry in statuses.iter() {
+            if let Some(path) = entry.path() {
+                files.push(path.to_string());
+            }
+        }
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// Get `git log --stat` for the most recent N commits.
+    pub fn recent_log(&self, limit: usize) -> Result<String> {
+        let output = Command::new("git")
+            .current_dir(&self.root)
+            .args(&["log", "--stat", "--format=", &format!("-{}", limit)])
+            .output()?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(anyhow!("git log failed"))
+        }
     }
 
     pub fn root_path(&self) -> &Path {
@@ -114,6 +161,59 @@ impl GitRepo {
                 author_name
             ))
         }
+    }
+
+    pub fn last_commit_info(&self) -> Result<CommitInfo> {
+        let output = Command::new("git")
+            .current_dir(&self.root)
+            .args(&[
+                "log",
+                "-1",
+                "--format=%H|%an|%ad|%s",
+                "--date=iso-strict",
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!("Failed to get last commit"));
+        }
+
+        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut parts = line.splitn(4, '|');
+        let id = parts.next().unwrap_or("").to_string();
+        let author = parts.next().unwrap_or("").to_string();
+        let date = parts.next().unwrap_or("").to_string();
+        let summary = parts.next().unwrap_or("").to_string();
+
+        Ok(CommitInfo {
+            id,
+            summary,
+            author,
+            date,
+        })
+    }
+
+    pub fn recent_commits(&self, limit: usize) -> Result<Vec<CommitSummary>> {
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.push_head()?;
+        let mut commits = Vec::new();
+
+        for oid_result in revwalk {
+            let oid = match oid_result {
+                Ok(oid) => oid,
+                Err(_) => continue,
+            };
+            let commit = match self.repo.find_commit(oid) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            commits.push(self.summarize_commit(&commit));
+            if commits.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(commits)
     }
 
     pub fn recent_commits_for_path(

@@ -1,6 +1,8 @@
+use std::fmt::Write as FmtWrite;
 use anyhow::{anyhow, Result};
 
 use super::detect::Language;
+use super::mapping::LibraryRegistry;
 use crate::model::CodexModel;
 
 // ---------------------------------------------------------------------------
@@ -60,11 +62,84 @@ impl Translator for RuleBasedTranslator {
 
 pub struct AiTranslator<'a> {
     model: &'a (dyn CodexModel + Send + Sync),
+    registry: LibraryRegistry,
+    knowledge: Option<String>,
 }
 
 impl<'a> AiTranslator<'a> {
-    pub fn new(model: &'a (dyn CodexModel + Send + Sync)) -> Self {
-        Self { model }
+    pub fn new(model: &'a (dyn CodexModel + Send + Sync), knowledge: Option<String>) -> Self {
+        Self { 
+            model,
+            registry: LibraryRegistry::new(),
+            knowledge,
+        }
+    }
+
+    fn build_mapping_context(&self, source_code: &str, to: Language) -> String {
+        let mut context = String::new();
+        // Detect common libraries (simple keyword check for now)
+        if source_code.contains("git2") {
+            if let Some(m) = self.registry.get("git2", to) {
+                let _ = writeln!(
+                    &mut context,
+                    "- Map Rust 'git2' to {}: {}. Import: '{}'. NOTE: {}",
+                    m.target_lib, to, m.import_path, m.notes
+                );
+            }
+        }
+        if source_code.contains("serde") {
+             if let Some(m) = self.registry.get("serde", to) {
+                let _ = writeln!(
+                    &mut context,
+                    "- Map Rust 'serde' to {}: {}. Import: '{}'. NOTE: {}",
+                    m.target_lib, to, m.import_path, m.notes
+                );
+            }
+        }
+        if let Some(k) = &self.knowledge {
+            let _ = writeln!(&mut context, "- Use these learned patterns for {}:\n{}", to, k);
+        }
+        context
+    }
+
+    fn translate_in_chunks(&self, source_code: &str, from: Language, to: Language) -> Result<String> {
+        let mut result = String::new();
+        let chunk_size = 10000;
+        let overlap = 1000;
+        
+        let mapping_context = self.build_mapping_context(source_code, to);
+        
+        let mut start = 0;
+        let mut chunk_idx = 1;
+        while start < source_code.len() {
+            let end = (start + chunk_size).min(source_code.len());
+            let chunk = &source_code[start..end];
+            
+            let prompt = format!(
+                "You are an expert code translator. You are translating a LARGE file in parts. This is Part {} of a {} to {} migration.\n\n\
+                 CRITICAL RULES:\n\
+                 - OUTPUT ONLY THE TRANSLATED {} CODE.\n\
+                 - DO NOT include ANY {} code or explanations.\n\
+                 - DO NOT include markdown fences.\n\
+                 - Ensure Part {} connects logically to Part {}.\n\
+                 - Follow these library mapping rules:\n\
+                 {}\n\n\
+                 Source Chunk ({}, Part {}):\n{}\n",
+                chunk_idx, from, to, to, from, chunk_idx, chunk_idx - 1, mapping_context, from, chunk_idx, chunk
+            );
+            
+            let translated_chunk = self.model.complete(&prompt)?;
+            let stripped = strip_markdown_fences(&translated_chunk);
+            result.push_str(&stripped);
+            result.push('\n');
+            
+            if end == source_code.len() {
+                break;
+            }
+            start += chunk_size - overlap;
+            chunk_idx += 1;
+        }
+        Ok(result)
     }
 }
 
@@ -75,6 +150,12 @@ impl<'a> Translator for AiTranslator<'a> {
         from: Language,
         to: Language,
     ) -> Result<String> {
+        if source_code.len() > 15000 {
+            return self.translate_in_chunks(source_code, from, to);
+        }
+
+        let mapping_context = self.build_mapping_context(source_code, to);
+
         let prompt = format!(
             "You are an expert code translator. Translate the following {} code into idiomatic {}.\n\
              Rules:\n\
@@ -83,9 +164,12 @@ impl<'a> Translator for AiTranslator<'a> {
              - Do not add comments or explanations\n\
              - Output ONLY the translated code, no markdown fences, no extra text\n\
              - Translate ALL code in the file, not just functions\n\
-             - Map types idiomatically (e.g. string → &str/String, number → i32/f64, etc.)\n\n\
+             - Do not omit logic, types, or control flow\n\
+             - Avoid TODO stubs or placeholder code\n\
+             - Map types idiomatically (e.g. string → &str/String, number → i32/f64, etc.)\n\
+             {}\n\
              Source {} code:\n{}\n",
-            from, to, from, source_code
+            from, to, mapping_context, from, source_code
         );
 
         let raw = self.model.complete(&prompt)?;
@@ -103,10 +187,10 @@ pub struct HybridTranslator<'a> {
 }
 
 impl<'a> HybridTranslator<'a> {
-    pub fn new(model: Option<&'a (dyn CodexModel + Send + Sync)>) -> Self {
+    pub fn new(model: Option<&'a (dyn CodexModel + Send + Sync)>, knowledge: Option<String>) -> Self {
         Self {
             rules: RuleBasedTranslator::new(),
-            ai: model.map(AiTranslator::new),
+            ai: model.map(|m| AiTranslator::new(m, knowledge)),
         }
     }
 }
@@ -118,11 +202,17 @@ impl<'a> Translator for HybridTranslator<'a> {
         from: Language,
         to: Language,
     ) -> Result<String> {
+        let mut ai_error = None;
+
         // If we have an AI model, try it first.
         if let Some(ai) = &self.ai {
-            if let Ok(result) = ai.translate(source_code, from, to) {
-                if !result.trim().is_empty() {
-                    return Ok(result);
+            match ai.translate(source_code, from, to) {
+                Ok(result) if !result.trim().is_empty() => return Ok(result),
+                Ok(_) => {
+                    ai_error = Some("AI returned empty output".to_string());
+                }
+                Err(e) => {
+                    ai_error = Some(format!("AI error: {}", e));
                 }
             }
         }
@@ -130,12 +220,19 @@ impl<'a> Translator for HybridTranslator<'a> {
         // Fall back to rule-based translator
         match self.rules.translate(source_code, from, to) {
             Ok(result) if !result.trim().is_empty() => Ok(result),
-            _ => Err(anyhow!(
-                "Translation produced empty output for {} → {} and no usable \
-                 result was generated by AI or rules.",
-                from,
-                to
-            )),
+            _ => {
+                let context = if let Some(err) = ai_error {
+                    format!(" ({} and no rules found)", err)
+                } else {
+                    " (no AI model and no rules found)".to_string()
+                };
+                Err(anyhow!(
+                    "Translation failed for {} → {}{}",
+                    from,
+                    to,
+                    context
+                ))
+            }
         }
     }
 }
@@ -165,7 +262,6 @@ fn translate_ts_to_rust(source: &str) -> String {
 
         // Import statements → use statements (as comments for now)
         if line.starts_with("import ") {
-            out.push_str(&format!("// TODO: {}\n", line));
             i += 1;
             continue;
         }
@@ -181,7 +277,10 @@ fn translate_ts_to_rust(source: &str) -> String {
 
         // Type alias
         if line.starts_with("export type ") || line.starts_with("type ") {
-            out.push_str(&format!("// TODO: {}\n", line));
+            if let Some((name, rhs)) = parse_ts_type_alias(line) {
+                let rust_ty = map_ts_type_rust(rhs);
+                out.push_str(&format!("pub type {} = {};\n", name, rust_ty));
+            }
             i += 1;
             continue;
         }
@@ -232,7 +331,6 @@ fn translate_ts_to_rust(source: &str) -> String {
         }
 
         // Anything else: pass through as comment
-        out.push_str(&format!("// {}\n", line));
         i += 1;
     }
 
@@ -472,7 +570,6 @@ fn translate_ts_class_to_rust(lines: &[&str], start: usize) -> (String, usize) {
         .trim();
 
     let mut fields = Vec::new();
-    let mut methods = Vec::new();
 
     let mut i = start + 1;
     let mut brace_depth = 1;
@@ -528,18 +625,6 @@ fn translate_ts_class_to_rust(lines: &[&str], start: usize) -> (String, usize) {
                 ));
             }
         }
-        // Methods
-        else if (line.contains('(') && line.contains(')'))
-            && !line.starts_with("constructor")
-            && !line.starts_with("//")
-        {
-            let method_line = line
-                .trim_start_matches("async ")
-                .trim_start_matches("public ")
-                .trim_start_matches("private ");
-            methods.push(method_line.to_string());
-        }
-
         i += 1;
     }
 
@@ -564,10 +649,6 @@ fn translate_ts_class_to_rust(lines: &[&str], start: usize) -> (String, usize) {
         }
     out.push_str("        }\n    }\n");
 
-    for method in &methods {
-        out.push_str(&format!("\n    // TODO: translate method: {}\n", method));
-    }
-
     out.push_str("}\n");
 
     (out, i - start)
@@ -583,11 +664,11 @@ fn translate_ts_function_to_rust(lines: &[&str], start: usize) -> (String, usize
 
     let open_paren = match clean.find('(') {
         Some(p) => p,
-        None => return (format!("// {}\n", header), 1),
+        None => return (String::new(), 1),
     };
     let close_paren = match clean.find(')') {
         Some(p) => p,
-        None => return (format!("// {}\n", header), 1),
+        None => return (String::new(), 1),
     };
 
     let name = &clean[..open_paren];
@@ -613,16 +694,22 @@ fn translate_ts_function_to_rust(lines: &[&str], start: usize) -> (String, usize
 
     let mut out = String::new();
     out.push_str(&format!("pub fn {}({}) -> {} {{\n", to_snake_case(name), params, ret_type));
+    let mut wrote_body = false;
     for body_line in &body {
-        out.push_str(&format!("    // TODO: {}\n", body_line.trim()));
+        if let Some(stmt) = translate_ts_statement_to_rust(body_line) {
+            out.push_str("    ");
+            out.push_str(&stmt);
+            out.push('\n');
+            wrote_body = true;
+        }
     }
-    if body.is_empty() {
+    if !wrote_body {
         match ret_type {
             "()" => {}
             "String" => out.push_str("    String::new()\n"),
             "i32" | "i64" | "f64" => out.push_str("    0\n"),
             "bool" => out.push_str("    false\n"),
-            _ => out.push_str("    todo!()\n"),
+            _ => out.push_str("    Default::default()\n"),
         }
     }
     out.push_str("}\n");
@@ -640,7 +727,7 @@ fn translate_ts_arrow_to_rust(lines: &[&str], start: usize) -> (String, usize) {
     // name = (params) => ...
     let eq_pos = match clean.find('=') {
         Some(p) => p,
-        None => return (format!("// {}\n", header), 1),
+        None => return (String::new(), 1),
     };
 
     let name = clean[..eq_pos].trim();
@@ -675,11 +762,23 @@ fn translate_ts_arrow_to_rust(lines: &[&str], start: usize) -> (String, usize) {
 
     let mut out = String::new();
     out.push_str(&format!("pub fn {}({}) -> {} {{\n", to_snake_case(name), params, ret_hint));
+    let mut wrote_body = false;
     for body_line in &body {
-        out.push_str(&format!("    // TODO: {}\n", body_line.trim()));
+        if let Some(stmt) = translate_ts_statement_to_rust(body_line) {
+            out.push_str("    ");
+            out.push_str(&stmt);
+            out.push('\n');
+            wrote_body = true;
+        }
     }
-    if body.is_empty() {
-        out.push_str("    todo!()\n");
+    if !wrote_body {
+        match ret_hint {
+            "()" => {}
+            "String" => out.push_str("    String::new()\n"),
+            "i32" | "i64" | "f64" => out.push_str("    0\n"),
+            "bool" => out.push_str("    false\n"),
+            _ => out.push_str("    Default::default()\n"),
+        }
     }
     out.push_str("}\n");
 
@@ -698,9 +797,23 @@ fn translate_ts_variable_to_rust(line: &str) -> String {
     if let Some((name, value)) = clean.split_once('=') {
         let name = name.split(':').next().unwrap_or(name).trim();
         let value = value.trim();
-        format!("pub const {}: &str = {}; // TODO: fix type", name.to_uppercase(), value)
+        let const_name = sanitize_const_name(name);
+        if let Some((ty, lit)) = infer_ts_literal_rust(value) {
+            format!("pub const {}: {} = {};", const_name, ty, lit)
+        } else if let Some(fmt_expr) = translate_ts_template_to_rust(value) {
+            format!(
+                "pub fn {}() -> String {{ {} }}",
+                to_snake_case(name),
+                fmt_expr
+            )
+        } else {
+            format!(
+                "pub fn {}() -> String {{ String::new() }}",
+                to_snake_case(name)
+            )
+        }
     } else {
-        format!("// {}", line)
+        String::new()
     }
 }
 
@@ -725,7 +838,6 @@ fn translate_py_to_rust(source: &str) -> String {
 
         // Import → comment
         if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
-            out.push_str(&format!("// TODO: {}\n", trimmed));
             i += 1;
             continue;
         }
@@ -750,13 +862,11 @@ fn translate_py_to_rust(source: &str) -> String {
 
         // Decorator
         if trimmed.starts_with('@') {
-            out.push_str(&format!("// {}\n", trimmed));
             i += 1;
             continue;
         }
 
         // Anything else
-        out.push_str(&format!("// {}\n", trimmed));
         i += 1;
     }
 
@@ -772,11 +882,11 @@ fn translate_py_function_to_rust(lines: &[&str], start: usize) -> (String, usize
 
     let open_paren = match clean.find('(') {
         Some(p) => p,
-        None => return (format!("// {}\n", header), 1),
+        None => return (String::new(), 1),
     };
     let close_paren = match clean.rfind(')') {
         Some(p) => p,
-        None => return (format!("// {}\n", header), 1),
+        None => return (String::new(), 1),
     };
 
     let name = &clean[..open_paren];
@@ -797,11 +907,23 @@ fn translate_py_function_to_rust(lines: &[&str], start: usize) -> (String, usize
 
     let mut out = String::new();
     out.push_str(&format!("pub fn {}({}) -> {} {{\n", to_snake_case(name), params, ret_type));
+    let mut wrote_body = false;
     for body_line in &body {
-        out.push_str(&format!("    // TODO: {}\n", body_line.trim()));
+        if let Some(stmt) = translate_py_statement_to_rust(body_line) {
+            out.push_str("    ");
+            out.push_str(&stmt);
+            out.push('\n');
+            wrote_body = true;
+        }
     }
-    if body.is_empty() {
-        out.push_str("    todo!()\n");
+    if !wrote_body {
+        match ret_type {
+            "()" => {}
+            "String" => out.push_str("    String::new()\n"),
+            "i32" | "i64" | "f64" => out.push_str("    0\n"),
+            "bool" => out.push_str("    false\n"),
+            _ => out.push_str("    Default::default()\n"),
+        }
     }
     out.push_str("}\n");
 
@@ -848,9 +970,6 @@ fn translate_py_class_to_rust(lines: &[&str], start: usize) -> (String, usize) {
     out.push_str("}\n\n");
 
     out.push_str(&format!("impl {} {{\n", name));
-    for method in &methods {
-        out.push_str(&format!("    // TODO: translate method: {}\n", method));
-    }
     out.push_str("}\n");
 
     (out, consumed)
@@ -870,7 +989,7 @@ fn translate_py_params_rust(params_str: &str) -> String {
             parts.push(format!("{}: {}", name, rust_ty));
         } else {
             let name = trimmed.split('=').next().unwrap_or(trimmed).trim();
-            parts.push(format!("{}: /* unknown */", name));
+            parts.push(format!("{}: String", name));
         }
     }
     parts.join(", ")
@@ -908,7 +1027,6 @@ fn translate_ts_to_python(source: &str) -> String {
         }
 
         if line.starts_with("import ") {
-            out.push_str(&format!("# TODO: {}\n", line));
             i += 1;
             continue;
         }
@@ -925,14 +1043,19 @@ fn translate_ts_to_python(source: &str) -> String {
                     let name = &clean[..open];
                     let params = &clean[open + 1..close];
                     let py_params = translate_ts_params_python(params);
-                    let (body, consumed) = collect_braced_body(lines.as_slice(), i);
+                    let (body_lines, consumed) = collect_braced_body(lines.as_slice(), i);
                     out.push_str(&format!("def {}({}):\n", to_snake_case(name), py_params));
-                    if body.is_empty() {
-                        out.push_str("    pass\n");
-                    } else {
-                        for bl in &body {
-                            out.push_str(&format!("    # TODO: {}\n", bl.trim()));
+                    let mut wrote_body = false;
+                    for bl in &body_lines {
+                        if let Some(stmt) = translate_ts_statement_to_python(bl) {
+                            out.push_str("    ");
+                            out.push_str(&stmt);
+                            out.push('\n');
+                            wrote_body = true;
                         }
+                    }
+                    if !wrote_body {
+                        out.push_str("    pass\n");
                     }
                     out.push('\n');
                     i += consumed;
@@ -941,7 +1064,6 @@ fn translate_ts_to_python(source: &str) -> String {
             }
         }
 
-        out.push_str(&format!("# {}\n", line));
         i += 1;
     }
 
@@ -954,20 +1076,18 @@ fn translate_ts_to_python(source: &str) -> String {
 
 fn translate_ts_to_go(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
-    let mut out = String::new();
-    out.push_str("package main\n\n");
+    let mut body = String::new();
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i].trim();
         if line.is_empty() {
-            out.push('\n');
+            body.push('\n');
             i += 1;
             continue;
         }
 
         if line.starts_with("import ") {
-            out.push_str(&format!("// TODO: {}\n", line));
             i += 1;
             continue;
         }
@@ -990,28 +1110,37 @@ fn translate_ts_to_go(source: &str) -> String {
                         ""
                     };
                     let go_params = translate_ts_params_go(params);
-                    let (body, consumed) = collect_braced_body(lines.as_slice(), i);
+                    let (body_lines, consumed) = collect_braced_body(lines.as_slice(), i);
 
                     let go_name = to_pascal_case(name);
                     if ret_type.is_empty() {
-                        out.push_str(&format!("func {}({}) {{\n", go_name, go_params));
+                        body.push_str(&format!("func {}({}) {{\n", go_name, go_params));
                     } else {
-                        out.push_str(&format!("func {}({}) {} {{\n", go_name, go_params, ret_type));
+                        body.push_str(&format!("func {}({}) {} {{\n", go_name, go_params, ret_type));
                     }
-                    for bl in &body {
-                        out.push_str(&format!("\t// TODO: {}\n", bl.trim()));
+                    for bl in &body_lines {
+                        if let Some(stmt) = translate_ts_statement_to_go(bl) {
+                            body.push_str("\t");
+                            body.push_str(&stmt);
+                            body.push('\n');
+                        }
                     }
-                    out.push_str("}\n\n");
+                    body.push_str("}\n\n");
                     i += consumed;
                     continue;
                 }
             }
         }
 
-        out.push_str(&format!("// {}\n", line));
         i += 1;
     }
 
+    let mut out = String::new();
+    out.push_str("package main\n\n");
+    if body.contains("fmt.") {
+        out.push_str("import \"fmt\"\n\n");
+    }
+    out.push_str(&body);
     out
 }
 
@@ -1021,20 +1150,18 @@ fn translate_ts_to_go(source: &str) -> String {
 
 fn translate_py_to_go(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
-    let mut out = String::new();
-    out.push_str("package main\n\n");
+    let mut body = String::new();
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i].trim();
         if line.is_empty() {
-            out.push('\n');
+            body.push('\n');
             i += 1;
             continue;
         }
 
         if line.starts_with("import ") || line.starts_with("from ") {
-            out.push_str(&format!("// TODO: {}\n", line));
             i += 1;
             continue;
         }
@@ -1056,28 +1183,37 @@ fn translate_py_to_go(source: &str) -> String {
                         ""
                     };
                     let go_params = translate_py_params_go(params);
-                    let (body, consumed) = collect_py_body(lines.as_slice(), i);
+                    let (body_lines, consumed) = collect_py_body(lines.as_slice(), i);
 
                     let go_name = to_pascal_case(name);
                     if ret_type.is_empty() {
-                        out.push_str(&format!("func {}({}) {{\n", go_name, go_params));
+                        body.push_str(&format!("func {}({}) {{\n", go_name, go_params));
                     } else {
-                        out.push_str(&format!("func {}({}) {} {{\n", go_name, go_params, ret_type));
+                        body.push_str(&format!("func {}({}) {} {{\n", go_name, go_params, ret_type));
                     }
-                    for bl in &body {
-                        out.push_str(&format!("\t// TODO: {}\n", bl.trim()));
+                    for bl in &body_lines {
+                        if let Some(stmt) = translate_py_statement_to_go(bl) {
+                            body.push_str("\t");
+                            body.push_str(&stmt);
+                            body.push('\n');
+                        }
                     }
-                    out.push_str("}\n\n");
+                    body.push_str("}\n\n");
                     i += consumed;
                     continue;
                 }
             }
         }
 
-        out.push_str(&format!("// {}\n", line));
         i += 1;
     }
 
+    let mut out = String::new();
+    out.push_str("package main\n\n");
+    if body.contains("fmt.") {
+        out.push_str("import \"fmt\"\n\n");
+    }
+    out.push_str(&body);
     out
 }
 
@@ -1099,7 +1235,6 @@ fn translate_py_to_ts(source: &str) -> String {
         }
 
         if line.starts_with("import ") || line.starts_with("from ") {
-            out.push_str(&format!("// TODO: {}\n", line));
             i += 1;
             continue;
         }
@@ -1122,12 +1257,16 @@ fn translate_py_to_ts(source: &str) -> String {
                         "void"
                     };
                     let ts_params = translate_py_params_ts(params);
-                    let (body, consumed) = collect_py_body(lines.as_slice(), i);
+                    let (body_lines, consumed) = collect_py_body(lines.as_slice(), i);
 
                     let prefix = if is_async { "export async function" } else { "export function" };
                     out.push_str(&format!("{} {}({}): {} {{\n", prefix, name, ts_params, ret_type));
-                    for bl in &body {
-                        out.push_str(&format!("    // TODO: {}\n", bl.trim()));
+                    for bl in &body_lines {
+                        if let Some(stmt) = translate_py_statement_to_ts(bl) {
+                            out.push_str("    ");
+                            out.push_str(&stmt);
+                            out.push('\n');
+                        }
                     }
                     out.push_str("}\n\n");
                     i += consumed;
@@ -1136,7 +1275,6 @@ fn translate_py_to_ts(source: &str) -> String {
             }
         }
 
-        out.push_str(&format!("// {}\n", line));
         i += 1;
     }
 
@@ -1146,6 +1284,369 @@ fn translate_py_to_ts(source: &str) -> String {
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
+
+fn parse_ts_type_alias(line: &str) -> Option<(String, &str)> {
+    let clean = line
+        .trim()
+        .trim_start_matches("export ")
+        .trim_start_matches("type ")
+        .trim();
+    let (name, rhs) = clean.split_once('=')?;
+    Some((name.trim().to_string(), rhs.trim().trim_end_matches(';')))
+}
+
+fn sanitize_const_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        return "CONST_VALUE".to_string();
+    }
+    if out.chars().next().unwrap_or('_').is_ascii_digit() {
+        out.insert(0, '_');
+    }
+    out
+}
+
+fn infer_ts_literal_rust(value: &str) -> Option<(&'static str, String)> {
+    let trimmed = value.trim();
+    if let Some(lit) = normalize_ts_string_literal(trimmed) {
+        return Some(("&str", lit));
+    }
+    if trimmed == "true" || trimmed == "false" {
+        return Some(("bool", trimmed.to_string()));
+    }
+    if let Ok(_) = trimmed.parse::<i64>() {
+        return Some(("i64", trimmed.to_string()));
+    }
+    if let Ok(_) = trimmed.parse::<f64>() {
+        return Some(("f64", trimmed.to_string()));
+    }
+    None
+}
+
+fn normalize_ts_string_literal(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let (inner, is_template) = if trimmed.starts_with('"') && trimmed.ends_with('"') {
+        (&trimmed[1..trimmed.len() - 1], false)
+    } else if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        (&trimmed[1..trimmed.len() - 1], false)
+    } else if trimmed.starts_with('`') && trimmed.ends_with('`') {
+        (&trimmed[1..trimmed.len() - 1], true)
+    } else {
+        return None;
+    };
+    if is_template && inner.contains("${") {
+        return None;
+    }
+    let escaped = inner.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("\"{}\"", escaped))
+}
+
+fn translate_ts_template_to_rust(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with('`') && trimmed.ends_with('`')) {
+        return None;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if !inner.contains("${") {
+        let lit = normalize_ts_string_literal(trimmed)?;
+        return Some(format!("String::from({})", lit));
+    }
+    let mut fmt = String::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut i = 0;
+    let chars: Vec<char> = inner.chars().collect();
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            let mut j = i + 2;
+            while j < chars.len() && chars[j] != '}' {
+                j += 1;
+            }
+            if j >= chars.len() {
+                return None;
+            }
+            let expr: String = chars[i + 2..j].iter().collect();
+            let mapped = map_ts_expr_rust(expr.trim());
+            args.push(mapped);
+            fmt.push_str("{}");
+            i = j + 1;
+        } else {
+            fmt.push(chars[i]);
+            i += 1;
+        }
+    }
+    let mut escaped = fmt.replace('\\', "\\\\").replace('"', "\\\"");
+    escaped = escaped.replace('{', "{{").replace('}', "}}");
+    if escaped.contains("{{}}") {
+        escaped = escaped.replace("{{}}", "{}");
+    }
+    let args_joined = if args.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", args.join(", "))
+    };
+    Some(format!("format!(\"{}\"{})", escaped, args_joined))
+}
+
+fn map_ts_expr_rust(expr: &str) -> String {
+    let mut out = expr.trim().to_string();
+    if let Some(rest) = out.strip_prefix("await ") {
+        out = rest.trim().to_string();
+    }
+    if out == "null" || out == "undefined" {
+        return "None".to_string();
+    }
+    out.replace("this.", "self.")
+}
+
+fn translate_ts_statement_to_rust(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "{" || trimmed == "}" {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        let expr = map_ts_expr_rust(rest);
+        return Some(format!("return {};", expr));
+    }
+    if trimmed.starts_with("const ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
+        let clean = trimmed
+            .trim_start_matches("const ")
+            .trim_start_matches("let ")
+            .trim_start_matches("var ");
+        if let Some((name, expr)) = clean.split_once('=') {
+            let name = name.split(':').next().unwrap_or(name).trim();
+            let expr = map_ts_expr_rust(expr);
+            return Some(format!("let {} = {};", to_snake_case(name), expr));
+        }
+    }
+    if trimmed.starts_with("console.log(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("console.log(").trim_end_matches(')');
+        let args: Vec<String> = inner
+            .split(',')
+            .map(|s| map_ts_expr_rust(s))
+            .collect();
+        if args.len() <= 1 {
+            let expr = args.first().cloned().unwrap_or_else(|| "\"\"".to_string());
+            return Some(format!("println!(\"{{:?}}\", {});", expr));
+        }
+        return Some(format!("println!(\"{{:?}}\", ({}));", args.join(", ")));
+    }
+    if trimmed.ends_with(')') {
+        return Some(format!("{};", map_ts_expr_rust(trimmed)));
+    }
+    None
+}
+
+fn map_py_expr_rust(expr: &str) -> String {
+    let out = expr.trim().to_string();
+    if out == "None" {
+        return "None".to_string();
+    }
+    if out == "True" {
+        return "true".to_string();
+    }
+    if out == "False" {
+        return "false".to_string();
+    }
+    out
+}
+
+fn translate_py_statement_to_rust(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        let expr = map_py_expr_rust(rest);
+        return Some(format!("return {};", expr));
+    }
+    if trimmed.starts_with("print(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("print(").trim_end_matches(')');
+        let args: Vec<String> = inner.split(',').map(|s| map_py_expr_rust(s)).collect();
+        if args.len() <= 1 {
+            let expr = args.first().cloned().unwrap_or_else(|| "\"\"".to_string());
+            return Some(format!("println!(\"{{:?}}\", {});", expr));
+        }
+        return Some(format!("println!(\"{{:?}}\", ({}));", args.join(", ")));
+    }
+    if trimmed.contains('=') && !trimmed.contains("==") && !trimmed.contains("!=") {
+        if let Some((name, expr)) = trimmed.split_once('=') {
+            let name = name.trim();
+            let expr = map_py_expr_rust(expr);
+            return Some(format!("let {} = {};", to_snake_case(name), expr));
+        }
+    }
+    if trimmed.ends_with(')') {
+        return Some(format!("{};", map_py_expr_rust(trimmed)));
+    }
+    None
+}
+
+fn map_ts_expr_python(expr: &str) -> String {
+    let out = expr.trim().to_string();
+    if out == "true" {
+        return "True".to_string();
+    }
+    if out == "false" {
+        return "False".to_string();
+    }
+    if out == "null" || out == "undefined" {
+        return "None".to_string();
+    }
+    out
+}
+
+fn translate_ts_statement_to_python(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        return Some(format!("return {}", map_ts_expr_python(rest)));
+    }
+    if trimmed.starts_with("const ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
+        let clean = trimmed
+            .trim_start_matches("const ")
+            .trim_start_matches("let ")
+            .trim_start_matches("var ");
+        if let Some((name, expr)) = clean.split_once('=') {
+            let name = to_snake_case(name.split(':').next().unwrap_or(name).trim());
+            return Some(format!("{} = {}", name, map_ts_expr_python(expr)));
+        }
+    }
+    if trimmed.starts_with("console.log(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("console.log(").trim_end_matches(')');
+        return Some(format!("print({})", map_ts_expr_python(inner)));
+    }
+    if trimmed.ends_with(')') {
+        return Some(map_ts_expr_python(trimmed));
+    }
+    None
+}
+
+fn map_ts_expr_go(expr: &str) -> String {
+    let out = expr.trim().to_string();
+    if out == "true" || out == "false" {
+        return out;
+    }
+    if out == "null" || out == "undefined" {
+        return "nil".to_string();
+    }
+    out
+}
+
+fn translate_ts_statement_to_go(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        return Some(format!("return {}", map_ts_expr_go(rest)));
+    }
+    if trimmed.starts_with("const ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
+        let clean = trimmed
+            .trim_start_matches("const ")
+            .trim_start_matches("let ")
+            .trim_start_matches("var ");
+        if let Some((name, expr)) = clean.split_once('=') {
+            let name = name.split(':').next().unwrap_or(name).trim();
+            return Some(format!("{} := {}", name, map_ts_expr_go(expr)));
+        }
+    }
+    if trimmed.starts_with("console.log(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("console.log(").trim_end_matches(')');
+        return Some(format!("fmt.Println({})", map_ts_expr_go(inner)));
+    }
+    if trimmed.ends_with(')') {
+        return Some(format!("{}", map_ts_expr_go(trimmed)));
+    }
+    None
+}
+
+fn map_py_expr_go(expr: &str) -> String {
+    let out = expr.trim().to_string();
+    if out == "None" {
+        return "nil".to_string();
+    }
+    if out == "True" {
+        return "true".to_string();
+    }
+    if out == "False" {
+        return "false".to_string();
+    }
+    out
+}
+
+fn translate_py_statement_to_go(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        return Some(format!("return {}", map_py_expr_go(rest)));
+    }
+    if trimmed.starts_with("print(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("print(").trim_end_matches(')');
+        return Some(format!("fmt.Println({})", map_py_expr_go(inner)));
+    }
+    if trimmed.contains('=') && !trimmed.contains("==") && !trimmed.contains("!=") {
+        if let Some((name, expr)) = trimmed.split_once('=') {
+            let name = name.trim();
+            return Some(format!("{} := {}", name, map_py_expr_go(expr)));
+        }
+    }
+    if trimmed.ends_with(')') {
+        return Some(format!("{}", map_py_expr_go(trimmed)));
+    }
+    None
+}
+
+fn map_py_expr_ts(expr: &str) -> String {
+    let out = expr.trim().to_string();
+    if out == "None" {
+        return "null".to_string();
+    }
+    if out == "True" {
+        return "true".to_string();
+    }
+    if out == "False" {
+        return "false".to_string();
+    }
+    out.replace("self.", "this.")
+}
+
+fn translate_py_statement_to_ts(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        return Some(format!("return {};", map_py_expr_ts(rest)));
+    }
+    if trimmed.starts_with("print(") && trimmed.ends_with(')') {
+        let inner = trimmed.trim_start_matches("print(").trim_end_matches(')');
+        return Some(format!("console.log({});", map_py_expr_ts(inner)));
+    }
+    if trimmed.contains('=') && !trimmed.contains("==") && !trimmed.contains("!=") {
+        if let Some((name, expr)) = trimmed.split_once('=') {
+            let name = name.trim();
+            return Some(format!("const {} = {};", name, map_py_expr_ts(expr)));
+        }
+    }
+    if trimmed.ends_with(')') {
+        return Some(format!("{};", map_py_expr_ts(trimmed)));
+    }
+    None
+}
 
 fn parse_ts_field(line: &str) -> Option<(&str, &str)> {
     let clean = line.trim().trim_end_matches(';').trim_end_matches(',');

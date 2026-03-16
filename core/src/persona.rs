@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Persona {
@@ -18,21 +17,36 @@ pub struct Persona {
 
 fn default_language() -> String { "professional english".to_string() }
 fn default_roast_level() -> String { "none".to_string() }
+fn default_persona_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .map(|u| format!("Astra ({})", u))
+        .unwrap_or_else(|_| "Astra".to_string())
+}
 
 impl Persona {
-    /// Loads the persona from `.codex/persona.yaml` if it exists.
-    /// Returns a default basic persona if the file is missing or invalid.
     pub fn load(root: &Path) -> Self {
-        let path = root.join(".codex").join("persona.yaml");
-        if let Ok(contents) = fs::read_to_string(&path) {
+        let preferred = root.join(".astra").join("persona.yaml");
+        if let Ok(contents) = fs::read_to_string(&preferred) {
             if let Ok(persona) = serde_yaml::from_str::<Persona>(&contents) {
                 return persona;
             }
         }
-        
-        // Return default professional persona
+        let previous = root.join(".forge").join("persona.yaml");
+        if let Ok(contents) = fs::read_to_string(&previous) {
+            if let Ok(persona) = serde_yaml::from_str::<Persona>(&contents) {
+                return persona;
+            }
+        }
+        let legacy = root.join(".codex").join("persona.yaml");
+        if let Ok(contents) = fs::read_to_string(&legacy) {
+            if let Ok(persona) = serde_yaml::from_str::<Persona>(&contents) {
+                return persona;
+            }
+        }
+
         Self {
-            name: "Codex".to_string(),
+            name: default_persona_name(),
             language: "professional english".to_string(),
             roast_level: "none".to_string(),
             catchphrase: String::new(),
@@ -43,12 +57,13 @@ impl Persona {
 
     /// Generates a persona on the fly based on built-in "vibes"
     pub fn from_vibe(vibe: &str) -> Self {
-        match vibe.to_lowercase().as_str() {
+        let clean_vibe = vibe.trim().trim_start_matches('-').to_lowercase();
+        match clean_vibe.as_str() {
             "nigerian-pidgin" => Self {
-                name: "Oga Codex".to_string(),
-                language: "Nigerian Pidgin English".to_string(),
-                roast_level: "maximum".to_string(),
-                catchphrase: "Omo this code ehn...".to_string(),
+                name: "Oga Astra".to_string(),
+                language: "Nigerian Pidgin mixed with Yoruba. Speak like a professional Senior Dev from a Lagos tech hub. Use Pidgin and Yoruba words naturally but sparingly (max once or twice per response). DO NOT repeat words like 'Omo' or 'OmO' over and over. Be helpful and direct.".to_string(),
+                roast_level: "none".to_string(),
+                catchphrase: "No shaking, we go run am.".to_string(),
                 model: None,
                 api_key: None,
             },

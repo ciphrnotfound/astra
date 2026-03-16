@@ -1,19 +1,19 @@
 so um i kinda wanna build a rust project and  Here's the full vision:
 
-🧠 codex — The CLI That Knows Your Codebase Better Than You Do
+🧠 astra — The CLI That Knows Your Codebase Better Than You Do
 The core idea no one has built: A conversational CLI that understands your entire codebase semantically across every language, lives locally, remembers everything, and can plan + execute cross-language refactors autonomously — like having a senior engineer who's read every line of code you've ever written.
 
 What Makes It Unprecedented
 🗣️ You talk to your codebase like a colleague
-bash$ codex "migrate our Express auth middleware to the Go service, match the same JWT logic"
-$ codex "why does the Python worker handle retries differently than the TS frontend?"
-$ codex "refactor all database calls to use our new connection pool pattern"
+bash$ astra "migrate our Express auth middleware to the Go service, match the same JWT logic"
+$ astra "why does the Python worker handle retries differently than the TS frontend?"
+$ astra "refactor all database calls to use our new connection pool pattern"
 Not a chatbot wrapper. It actually does it — with diffs, PR descriptions, rollback plans.
 
 🧬 The Memory Layer (never been done locally)
 
 Builds a persistent semantic graph of your codebase on first run
-Stored locally in ~/.codex/ — no cloud, no sending your code anywhere
+Stored locally in ~/.astra/ — no cloud, no sending your code anywhere
 Every git commit updates the graph incrementally
 Remembers why decisions were made (reads PR descriptions, commit messages, comments)
 Over time it knows: "You always use zod for validation in TS but pydantic in Python — want me to keep that pattern?"
@@ -21,7 +21,7 @@ Over time it knows: "You always use zod for validation in TS but pydantic in Pyt
 
 ⚡ Cross-Language Refactor Engine
 The killer feature. It understands semantic equivalence across languages:
-bash$ codex "we're migrating the billing service from Python → Go, start with the invoice module"
+bash$ astra "we're migrating the billing service from Python → Go, start with the invoice module"
 It will:
 
 Parse the Python module into a language-agnostic AST
@@ -33,18 +33,18 @@ Flag things it's uncertain about for human review
 Supported: TypeScript ↔ Go ↔ Python ↔ Rust ↔ Java
 
 🔗 Hooks Into Everything (zero config)
-bash$ codex init   # that's it
+bash$ astra init   # that's it
 ```
 - **Git hooks** — pre-commit it scans for cross-language inconsistencies
 - **CI integration** — posts refactor suggestions as PR comments
 - **Editor** — LSP-compatible, works in Neovim, VSCode, Zed via a sidecar process
-- **Watch mode** — `codex watch` runs in background, surfaces insights as you code
+- **Watch mode** — `astra watch` runs in background, surfaces insights as you code
 
 ---
 
 ### 🏗️ Architecture (Rust is perfect for this)
 ```
-codex/
+astra/
 ├── core/           # Rust — the engine
 │   ├── parser/     # tree-sitter grammars for all languages
 │   ├── graph/      # semantic code graph (petgraph)
@@ -67,14 +67,14 @@ codex/
 
 ## The Experience
 ```
-$ codex
+$ astra
 
-  ▸ codex v0.1.0 — knowing your codebase since 3 weeks ago
+  ▸ astra v0.1.0 — knowing your codebase since 3 weeks ago
   ▸ 47,832 symbols indexed · 12 services · 4 languages · last commit 2m ago
 
   You: migrate the user auth from TS to Go, keep the same test coverage
 
-  codex: I found the auth module in /services/auth (TypeScript, 847 lines).
+  astra: I found the auth module in /services/auth (TypeScript, 847 lines).
          It has 23 tests covering login, refresh, and revocation flows.
 
          Here's my plan:
@@ -89,18 +89,18 @@ $ codex
 
 Why It's Never Been Built
 Existing toolsWhat they missGitHub CopilotNo cross-language semantic understanding, no memory, cloud-onlyast-grepJust search/replace, no AI, no migration planningAider, CursorSingle-language context window, no persistent codebase graphOpenRewriteJava-only, no conversational interface, no local memory
-codex is the first tool that combines: local semantic memory + cross-language AST intelligence + conversational UX + autonomous multi-step execution.
+astra is the first tool that combines: local semantic memory + cross-language AST intelligence + conversational UX + autonomous multi-step execution.
 
 Haha — we went so deep into Bothive, Clara and HiveMind that you forgot your own product. Here's the full recap:
 
-What Codex Does
+What Astra Does
 One line: A conversational CLI that lives in your terminal, knows your entire codebase, and can migrate/refactor code across any programming language.
 
 The Core Features
 🗣️ You Talk To Your Codebase
-bash$ codex "migrate our Python auth service to Go"
-$ codex "why does TS frontend handle errors differently than the Go API?"
-$ codex "refactor all database calls to use the new connection pool"
+bash$ astra "migrate our Python auth service to Go"
+$ astra "why does TS frontend handle errors differently than the Go API?"
+$ astra "refactor all database calls to use the new connection pool"
 It doesn't just suggest — it actually does it. Writes the code, creates diffs, explains decisions.
 🧠 Persistent Memory
 
@@ -110,12 +110,12 @@ Reads your commits, PRs, comments
 Gets smarter the longer you use it
 Never forgets anything
 
-bash$ codex "why did we switch from REST to GraphQL?"
+bash$ astra "why did we switch from REST to GraphQL?"
 > In March you merged PR #47 — over-fetching 
   issues on mobile. Decision made by @you.
 🔀 Cross Language Migration Engine
 The killer feature nobody else has:
-bash$ codex "migrate billing service from Python to Go, 
+bash$ astra "migrate billing service from Python to Go, 
          keep the same test coverage"
 ```
 It will:
@@ -136,7 +136,7 @@ Uses Ollama under the hood
 Perfect for enterprise devs, NDAs, sensitive codebases
 
 🔗 Hooks Into Everything Automatically
-bash$ codex init   # that's literally it
+bash$ astra init   # that's literally it
 ```
 - Git hooks — scans for cross language inconsistencies before every commit
 - CI integration — posts refactor suggestions as PR comments
@@ -147,14 +147,14 @@ bash$ codex init   # that's literally it
 
 ## What It Feels Like To Use
 ```
-$ codex
+$ astra
 
-  ▸ codex v0.1.0 — knowing your codebase since 3 weeks ago
+  ▸ astra v0.1.0 — knowing your codebase since 3 weeks ago
   ▸ 47,832 symbols indexed · 12 services · 4 languages
 
   You: migrate user auth from TS to Go, keep test coverage
 
-  codex: Found auth module in /services/auth 
+  astra: Found auth module in /services/auth 
          TypeScript, 847 lines, 23 tests.
 
          Plan:
@@ -205,12 +205,12 @@ The features that make developers stop what they're doing, share it with their e
 
 🌐 1. Cross-Repo Intelligence
 Not just your codebase. ALL your codebases simultaneously.
-bash$ codex "our mobile app, backend API and ML pipeline 
+bash$ astra "our mobile app, backend API and ML pipeline 
          are all out of sync on the user schema — fix all three"
 It understands relationships between repos. No tool does this. Ever.
 
 🐛 2. Time Travel Debugging
-bash$ codex "this bug was introduced sometime last month, find it"
+bash$ astra "this bug was introduced sometime last month, find it"
 
 Walks through your entire git history semantically
 Doesn't just grep — understands what changed and why
@@ -219,10 +219,10 @@ Explains what the developer was thinking when they wrote it
 
 
 👥 3. Team Brain & Task Flow (Codex Teams)
-bash$ codex team init --key "team_xk492_alpha"
-$ codex team assign @sarah "refactor auth logic"
-$ codex team start task_12
-$ codex team finish task_12
+bash$ astra team init --key "team_xk492_alpha"
+$ astra team assign @sarah "refactor auth logic"
+$ astra team start task_12
+$ astra team finish task_12
 
 - It's not just a solo tool, it handles full team workflows via team API keys.
 - Dev Leads (Admins) distribute tasks to specific teammates.
@@ -233,7 +233,7 @@ $ codex team finish task_12
 ### 🔮 4. **Predictive Refactoring**
 Codex doesn't wait for you to ask. It watches your codebase and tells you:
 ```
-  ▸ codex: Hey — I noticed you've changed the User model 
+  ▸ astra: Hey — I noticed you've changed the User model 
            3 times this week. There are 47 places across 
            4 services that will break next time you change it.
            Want me to decouple them now before it becomes 
@@ -242,7 +242,7 @@ Proactive. Not reactive. Like a senior engineer watching over your shoulder.
 
 🧪 5. Test Generation That Actually Understands Intent
 Not just generating tests for coverage. Generating tests that understand what the code is supposed to do:
-bash$ codex "write tests for the payment service but think like 
+bash$ astra "write tests for the payment service but think like 
          a malicious user trying to break it"
 
 Security-focused test generation
@@ -252,7 +252,7 @@ Matches your existing test style and patterns
 
 
 📊 6. Codebase Health Dashboard
-bash$ codex health
+bash$ astra health
 ```
 ```
   CODEBASE HEALTH REPORT
@@ -269,7 +269,7 @@ bash$ codex health
 At a glance, every morning, you know exactly what needs attention.
 
 🔐 7. Security Vulnerability Hunter
-bash$ codex "audit the entire codebase for security issues"
+bash$ astra "audit the entire codebase for security issues"
 
 Understands your specific stack deeply
 Doesn't just run static analysis — reasons about vulnerabilities
@@ -279,7 +279,7 @@ Traces data flow across languages
 No existing tool traces vulnerabilities across language boundaries.
 
 🤝 8. PR Autopilot
-bash$ codex ship "add rate limiting to the API"
+bash$ astra ship "add rate limiting to the API"
 Codex:
 
 Writes the code
@@ -294,8 +294,8 @@ You just described what you want. Codex handles the entire lifecycle.
 
 🌍 9. Legacy Code Archaeologist
 The feature enterprises would pay fortunes for:
-bash$ codex "explain this COBOL service written in 1987"
-$ codex "migrate it to Go without breaking anything"
+bash$ astra "explain this COBOL service written in 1987"
+$ astra "migrate it to Go without breaking anything"
 
 Understands ancient codebases
 Reads undocumented systems
@@ -305,7 +305,7 @@ Writes documentation for code that has none
 Banks, governments, enterprises have millions of lines of legacy code they're desperate to modernize. This is a multi-billion dollar problem.
 
 💬 10. Codex Collaborate — Real Time Multi Dev
-bash$ codex collab start
+bash$ astra collab start
   ▸ Session started — share this link with your team
   ▸ 3 developers connected
   
@@ -313,7 +313,7 @@ bash$ codex collab start
   Sarah:  "keep the JWT implementation, just restructure"
   Mike:   "and add refresh token support"
   
-  codex:  "Got it — here's a plan that satisfies all three..."
+  astra:  "Got it — here's a plan that satisfies all three..."
 ```
 
 Multiple developers talking to the same codebase simultaneously. Codex mediates, resolves conflicts, executes the unified plan.

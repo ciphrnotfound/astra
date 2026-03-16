@@ -1,0 +1,26 @@
+{
+  "name": "astra-cli",
+  "version": "0.1.0",
+  "description": "A powerful conversational CLI for codebase analysis and autonomous refactoring.",
+  "main": "index.js",
+  "bin": {
+    "astra": "./bin/astra.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "refactor",
+    "rust",
+    "codebase",
+    "assistant"
+  ],
+  "author": "Astra Team",
+  "license": "MIT",
+  "dependencies": {},
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

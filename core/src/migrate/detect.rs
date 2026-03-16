@@ -10,6 +10,10 @@ pub enum Language {
     Go,
     Rust,
     Java,
+    React,
+    NextJs,
+    Vue,
+    Svelte,
 }
 
 impl Language {
@@ -22,6 +26,10 @@ impl Language {
             Language::Go => &["go"],
             Language::Rust => &["rs"],
             Language::Java => &["java"],
+            Language::React => &["jsx", "tsx"],
+            Language::NextJs => &["jsx", "tsx"],
+            Language::Vue => &["vue"],
+            Language::Svelte => &["svelte"],
         }
     }
 
@@ -34,6 +42,10 @@ impl Language {
             Language::Go => "go",
             Language::Rust => "rs",
             Language::Java => "java",
+            Language::React => "tsx",
+            Language::NextJs => "tsx",
+            Language::Vue => "vue",
+            Language::Svelte => "svelte",
         }
     }
 
@@ -46,6 +58,10 @@ impl Language {
             "go" | "golang" => Some(Language::Go),
             "rs" | "rust" => Some(Language::Rust),
             "java" => Some(Language::Java),
+            "react" => Some(Language::React),
+            "next" | "nextjs" => Some(Language::NextJs),
+            "vue" => Some(Language::Vue),
+            "svelte" => Some(Language::Svelte),
             _ => None,
         }
     }
@@ -58,6 +74,7 @@ impl Language {
             Language::Go => "go",
             Language::Rust => "cargo",
             Language::Java => "javac",
+            Language::React | Language::NextJs | Language::Vue | Language::Svelte => "npm",
         }
     }
 }
@@ -71,6 +88,10 @@ impl fmt::Display for Language {
             Language::Go => write!(f, "Go"),
             Language::Rust => write!(f, "Rust"),
             Language::Java => write!(f, "Java"),
+            Language::React => write!(f, "React"),
+            Language::NextJs => write!(f, "Next.js"),
+            Language::Vue => write!(f, "Vue"),
+            Language::Svelte => write!(f, "Svelte"),
         }
     }
 }
@@ -86,6 +107,10 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         Language::Go,
         Language::Rust,
         Language::Java,
+        Language::React,
+        Language::NextJs,
+        Language::Vue,
+        Language::Svelte,
     ];
     for lang in &all_languages {
         if lang.extensions().contains(&ext_lower.as_str()) {
@@ -108,6 +133,8 @@ const SKIP_DIRS: &[&str] = &[
     ".next",
     ".idea",
     ".vscode",
+    ".astra",
+    ".forge",
     ".codex",
     "vendor",
     "bin",
@@ -116,11 +143,19 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Recursively discover all source files for a given language in a directory.
 pub fn discover_source_files(
-    dir: &Path,
+    path: &Path,
     lang: Language,
 ) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
-    discover_recursive(dir, lang, &mut files);
+    if path.is_file() {
+        if let Some(detected) = detect_language(path) {
+            if detected == lang {
+                files.push(path.to_path_buf());
+            }
+        }
+    } else {
+        discover_recursive(path, lang, &mut files);
+    }
     files.sort();
     files
 }

@@ -1,22 +1,32 @@
 # Rust
 /target/
 Cargo.lock
+**/*.rs.bk
+*.pdb
 
 # Node.js
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+package-lock.json
+.npm
+.yarn
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*.iml
+.project
+.classpath
+.settings/
 
 # OS
 .DS_Store
 Thumbs.db
+*.bak
 
 # Logs
 *.log
@@ -28,7 +38,67 @@ check_errors.txt
 *.dll
 *.so
 *.dylib
+dist/
+build/
+out/
 
 # Temporary files
 *.tmp
 *.temp
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Astra/Codex specific
+.astra/
+.codex/
+*.codex
+memory.json
+
+# Test coverage
+coverage/
+*.coverage
+.nyc_output/
+lcov.info
+
+# Python (if used)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+venv/
+.venv/
+ENV/
+
+# Go (if used)
+*.test
+*.out
+vendor/
+
+# Java (if used)
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+gradle-app.setting
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Misc
+check.json

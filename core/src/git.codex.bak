@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result};a
 use git2::{Commit, Oid, Repository};
 
 pub struct GitRepo {
@@ -21,7 +21,7 @@ impl GitRepo {
         let repo = Repository::discover(root)?;
         let workdir = repo
             .workdir()
-            .ok_or_else(|| anyhow!("repository has no workdir").context("No repository workdir"))?;
+            .ok_or_else(|| anyhow!("repository has no workdir"))?;
         Ok(Self {
             root: workdir.to_path_buf(),
             repo,
@@ -51,10 +51,9 @@ impl GitRepo {
         &self.root
     }
 
-    /// Returns the current HEAD commit hash if repository has a HEAD.
     pub fn get_head_commit(&self) -> Result<String> {
-        let head = self.repo.head()?;
-        if head.is_null() {
+        let head = self.repo.head();
+        if head.is_err() {
             return Err(anyhow!("Repository has no HEAD"));
         }
 
@@ -71,9 +70,7 @@ impl GitRepo {
         }
     }
 
-    /// Returns (lines_added, lines_deleted) between the given commit and the current working tree.
     pub fn get_diff_stats(&self, from_commit: &str) -> Result<(usize, usize)> {
-        // git diff --numstat <commit>
         let output = Command::new("git")
             .current_dir(&self.root)
             .args(&["diff", "--numstat", from_commit])
@@ -102,8 +99,6 @@ impl GitRepo {
         Ok((added, deleted))
     }
 
-    /// Fetches the last N commits made by a specific author, including their diff patches.
-    /// This is used for simulating teammate code reviews and learning their style.
     pub fn get_commits_by_author(&self, author_name: &str, limit: usize) -> Result<String> {
         let author_arg = format!("--author={}", author_name);
         let output = Command::new("git")
@@ -114,7 +109,10 @@ impl GitRepo {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
-            Err(anyhow::anyhow!("Failed to get commits for author {}", author_name))
+            Err(anyhow::anyhow!(
+                "Failed to get commits for author {}",
+                author_name
+            ))
         }
     }
 
@@ -136,7 +134,7 @@ impl GitRepo {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if self.commit_touches_path(&commit, rel_path)? {
+            if Self::commit_touches_path(&commit, rel_path, &self.repo)? {
                 commits.push(self.summarize_commit(&commit));
                 if commits.len() >= limit {
                     break;
@@ -147,7 +145,7 @@ impl GitRepo {
         Ok(commits)
     }
 
-    fn commit_touches_path(&self, commit: &Commit<'_>, rel_path: &Path) -> Result<bool> {
+    fn commit_touches_path(commit: &Commit<'_>, rel_path: &Path, repo: &Repository) -> Result<bool> {
         let tree = commit.tree()?;
         let parent = match commit.parents().next() {
             Some(p) => p,
@@ -155,9 +153,7 @@ impl GitRepo {
         };
         let parent_tree = parent.tree()?;
 
-        let diff = self
-            .repo
-            .diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
+        let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
 
         let mut touched = false;
         let rel_str = rel_path.to_string_lossy();
@@ -208,9 +204,9 @@ impl GitRepo {
             time,
         }
     }
+}
 
-    fn short_oid(oid: Oid) -> String {
-        let s = oid.to_string();
-        s.chars().take(8).collect()
-    }
+fn short_oid(oid: Oid) -> String {
+    let s = oid.to_string();
+    s.chars().take(8).collect()
 }

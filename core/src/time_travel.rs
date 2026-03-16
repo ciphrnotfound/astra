@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
@@ -51,7 +50,7 @@ pub fn run_semantic_bisect(
         return Err(anyhow!("No commits found in git history to analyze."));
     }
 
-    println!("codex ▸ Analyzing {} recent commits to find the bug...", commits.len());
+    println!("astra ▸ Analyzing {} recent commits to find the bug...", commits.len());
 
     let mut analyzed_count = 0;
 
@@ -81,7 +80,7 @@ pub fn run_semantic_bisect(
             }
         }
 
-        print!("codex ▸ Semantically checking {} ({}) ... ", id, summary);
+        print!("astra ▸ Semantically checking {} ({}) ... ", id, summary);
         use std::io::Write;
         let _ = std::io::stdout().flush();
 

@@ -4,15 +4,17 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use codex_core::engine::CodexEngine;
-use codex_core::migrate::detect::Language;
-use codex_core::migrate::orchestrate::MigrationConfig;
-use codex_core::migrate;
-use codex_core::model::GroqModel;
-use codex_core::teams::TeamManager;
+use astra_core::engine::CodexEngine;
+use astra_core::migrate::detect::Language;
+use astra_core::migrate::orchestrate::MigrationConfig;
+use astra_core::migrate;
+use astra_core::model::{CodexModel, GroqModel, OllamaModel, TavilySearch};
+use astra_core::teams::{TeamManager, TeamRole};
+
+use crossterm::style::Stylize;
 
 #[derive(Parser)]
-#[command(name = "codex")]
+#[command(name = "astra")]
 #[command(about = "A conversational CLI for understanding and migrating your codebase")]
 struct Args {
     #[command(subcommand)]
@@ -32,6 +34,18 @@ struct Args {
     /// Groq model name override
     #[arg(long)]
     groq_model: Option<String>,
+
+    /// Enable the Ollama language model
+    #[arg(long)]
+    use_ollama: bool,
+
+    /// Ollama model name override
+    #[arg(long)]
+    ollama_model: Option<String>,
+
+    /// Ollama API endpoint override
+    #[arg(long)]
+    ollama_url: Option<String>,
 
     /// Path to .env file for API keys
     #[arg(long)]
@@ -58,6 +72,10 @@ struct Args {
     /// Use AI-assisted translation during migration
     #[arg(long)]
     ai: bool,
+
+    /// Clean up migrated code using semantic cleanup engine
+    #[arg(long)]
+    clean: bool,
 
     // ── Quick-action flags ───────────────────────────────────────────
 
@@ -92,11 +110,23 @@ struct Args {
     /// Switch persona vibe (e.g., nigerian-pidgin, professional, brutal)
     #[arg(long)]
     vibe: Option<String>,
+
+    /// Run predictive refactoring analysis
+    #[arg(long)]
+    predict: bool,
+
+    /// Install git pre-commit hook
+    #[arg(long)]
+    hook: bool,
+
+    /// Start watch mode (monitors file changes in real time)
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Codex Teams: task assignment and productivity tracking
+    /// Astra Teams: task assignment and productivity tracking
     Team {
         #[command(subcommand)]
         action: TeamAction,
@@ -106,19 +136,37 @@ enum Commands {
 #[derive(Subcommand)]
 enum TeamAction {
     /// Initialize a new team for this project
-    Init { name: String, api_key: String },
+    Init { name: String, admin_key: Option<String> },
+    /// Admin: Add a team member with a role and key
+    AddMember {
+        name: String,
+        role: String,
+        admin_key: String,
+        member_key: Option<String>,
+    },
     /// Admin: Assign a task to a developer
     Assign {
         task_id: String,
         developer: String,
         description: String,
+        admin_key: String,
     },
     /// Developer: Start working on a task (starts timer & saves git state)
-    Start { task_id: String, developer: String },
+    Start {
+        task_id: String,
+        developer: String,
+        member_key: String,
+    },
     /// Developer: Finish a task (stops timer & diffs code changes)
-    Finish { task_id: String, developer: String },
+    Finish {
+        task_id: String,
+        developer: String,
+        member_key: String,
+    },
     /// Admin: Generate an end-of-week productivity report
-    Report,
+    Report { admin_key: String },
+    /// Sync team state with the distributed Git branch (astra-state)
+    Sync,
 }
 
 fn main() -> Result<()> {
@@ -134,10 +182,10 @@ fn main() -> Result<()> {
     let mut engine = CodexEngine::with_root(root.clone());
 
     if let Some(vibe_name) = &args.vibe {
-        engine.set_persona(codex_core::persona::Persona::from_vibe(vibe_name));
+        engine.set_persona(astra_core::persona::Persona::from_vibe(vibe_name));
     }
 
-    let persona = codex_core::persona::Persona::load(&root);
+    let persona = astra_core::persona::Persona::load(&root);
 
     if let Some(byok_key) = persona.api_key.clone() {
         std::env::set_var("GROQ_API_KEY", &byok_key);
@@ -147,41 +195,79 @@ fn main() -> Result<()> {
             "Using persona BYOK model {} for LLM features.",
             persona
                 .model
+                .clone()
                 .unwrap_or_else(|| "llama-3.1-8b-instant".to_string())
         );
+    } else if let Some(ollama_url) = std::env::var("OLLAMA_URL").ok().or(args.ollama_url.clone()) {
+        let model = args.ollama_model.clone().or_else(|| std::env::var("OLLAMA_MODEL").ok());
+        let ollama = OllamaModel::from_env(model, Some(ollama_url))?;
+        engine.set_model(Box::new(ollama));
     } else if args.use_groq || std::env::var("GROQ_API_KEY").is_ok() {
-        let groq = GroqModel::from_env(args.groq_model.clone())?;
+        let model_name = args.groq_model.clone().or_else(|| persona.model.clone());
+        let groq = GroqModel::from_env(model_name)?;
         engine.set_model(Box::new(groq));
+    }
+
+    if std::env::var("TAVILY_API_KEY").is_ok() {
+        if let Ok(search) = TavilySearch::from_env() {
+            engine.set_search(Box::new(search));
+        }
     }
 
     // ── Handle Team Subcommand ───────────────────────────────────────
     if let Some(Commands::Team { action }) = args.command {
         let team_mgr = TeamManager::new(&root);
         match action {
-            TeamAction::Init { name, api_key } => {
-                team_mgr.init_team(&name, &api_key)?;
+            TeamAction::Init { name, admin_key } => {
+                let key = team_mgr.init_team(&name, admin_key.as_deref())?;
                 println!("✅ Team '{}' initialized successfully.", name);
+                println!("🔑 Admin key: {}", key);
+            }
+            TeamAction::AddMember {
+                name,
+                role,
+                member_key,
+                admin_key,
+            } => {
+                let parsed_role = parse_team_role(&role)?;
+                let key = team_mgr.add_member(
+                    &admin_key,
+                    &name,
+                    parsed_role,
+                    member_key.as_deref(),
+                )?;
+                println!("✅ Added member '{}' with role {}.", name, role);
+                println!("🔑 Member key: {}", key);
             }
             TeamAction::Assign {
                 task_id,
                 developer,
                 description,
+                admin_key,
             } => {
-                team_mgr.assign_task(&task_id, &description, &developer)?;
+                team_mgr.assign_task(&admin_key, &task_id, &description, &developer)?;
                 println!(
                     "📌 Task '{}' assigned to {}: {}",
                     task_id, developer, description
                 );
             }
-            TeamAction::Start { task_id, developer } => {
-                team_mgr.start_task(&task_id, &developer)?;
+            TeamAction::Start {
+                task_id,
+                developer,
+                member_key,
+            } => {
+                team_mgr.start_task(&member_key, &task_id, &developer)?;
                 println!(
                     "🚀 {} started working on task '{}'. Timer and Git tracking active.",
                     developer, task_id
                 );
             }
-            TeamAction::Finish { task_id, developer } => {
-                let session = team_mgr.finish_task(&task_id, &developer)?;
+            TeamAction::Finish {
+                task_id,
+                developer,
+                member_key,
+            } => {
+                let session = team_mgr.finish_task(&member_key, &task_id, &developer)?;
                 let duration = session.end_time.unwrap_or(0).saturating_sub(session.start_time);
                 let hours = duration / 3600;
                 let mins = (duration % 3600) / 60;
@@ -191,9 +277,13 @@ fn main() -> Result<()> {
                     hours, mins, session.lines_added, session.lines_deleted
                 );
             }
-            TeamAction::Report => {
-                let report = team_mgr.generate_report()?;
+            TeamAction::Report { admin_key } => {
+                let report = team_mgr.generate_report(&admin_key)?;
                 println!("{}", report);
+            }
+            TeamAction::Sync => {
+                team_mgr.sync()?;
+                println!("✅ Team state synchronized with origin/astra-state successfully.");
             }
         }
         return Ok(());
@@ -207,31 +297,31 @@ fn main() -> Result<()> {
     
     // If a team is initialized, start tracking implicitly
     if let Ok(state) = team_mgr.load_state() {
-        if !state.team_name.is_empty() {
+        if !state.team_name.is_empty() && state.members.is_empty() {
             let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local_dev".to_string());
             current_user = user.clone();
             
-            // Auto-assign and start a generic "Codex Usage" task if they aren't already working on one
+            // Auto-assign and start a generic "Astra Usage" task if they aren't already working on one
             if !state.sessions.iter().any(|s| s.developer == user && s.end_time.is_none()) {
                 implicit_task_id = format!("auto-session-{}", std::process::id());
-                let _ = team_mgr.assign_task(&implicit_task_id, "Implicit Codex Usage", &user);
-                if team_mgr.start_task(&implicit_task_id, &user).is_ok() {
+                let _ = team_mgr.assign_task_implicit(&implicit_task_id, "Implicit Astra Usage", &user);
+                if team_mgr.start_task_implicit(&implicit_task_id, &user).is_ok() {
                     implicit_session = true;
-                    println!("⏱️  [Codex Teams] Implicit time tracking started for {}.", user);
+                    println!("⏱️  [Astra Teams] Implicit time tracking started for {}.", user);
                 }
             }
         }
     }
 
-    let result = run_cli_logic(args, engine);
+    let result = run_cli_logic(args, engine, persona.clone());
 
     if implicit_session {
         // Find the active implicit task and finish it
         if let Ok(state) = team_mgr.load_state() {
             if let Some(session) = state.sessions.iter().find(|s| s.developer == current_user && s.end_time.is_none() && s.task_id == implicit_task_id) {
-                if let Ok(finished) = team_mgr.finish_task(&session.task_id, &current_user) {
+                if let Ok(finished) = team_mgr.finish_task_implicit(&session.task_id, &current_user) {
                     let dur = finished.end_time.unwrap_or(0).saturating_sub(finished.start_time);
-                    println!("\n⏱️  [Codex Teams] Session ended. Time logged: {}s. Code changed: +{} -{} lines.", 
+                    println!("\n⏱️  [Astra Teams] Session ended. Time logged: {}s. Code changed: +{} -{} lines.", 
                         dur, finished.lines_added, finished.lines_deleted);
                 }
             }
@@ -241,7 +331,12 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_cli_logic(args: Args, mut engine: CodexEngine) -> Result<()> {
+enum MigrationModel {
+    Groq(GroqModel),
+    Ollama(OllamaModel),
+}
+
+fn run_cli_logic(args: Args, mut engine: CodexEngine, persona: astra_core::persona::Persona) -> Result<()> {
     // ── Handle --migrate ─────────────────────────────────────────────
     if let Some(source_dir) = args.migrate {
         let from_str = args
@@ -274,20 +369,44 @@ fn run_cli_logic(args: Args, mut engine: CodexEngine) -> Result<()> {
             std::process::exit(1);
         });
 
+        // Phase 6: Pre-migration research
+        let mut knowledge = None;
+        if args.ai && engine.has_search() {
+             println!("Researching latest {} syntax and best practices...", to_lang);
+             knowledge = engine.research_language(to_lang).ok();
+        }
+
         let config = MigrationConfig {
             source_dir,
             output_dir,
             from_lang,
             to_lang,
             use_ai: args.ai,
+            use_clean: args.clean,
+            knowledge,
         };
 
-        let mut model_holder: Option<GroqModel> = None;
-        if args.use_groq && args.ai {
-            model_holder = Some(GroqModel::from_env(args.groq_model.clone())?);
+        let mut model_holder: Option<MigrationModel> = None;
+        if args.ai {
+            if args.use_ollama
+                || std::env::var("OLLAMA_URL").is_ok()
+                || std::env::var("OLLAMA_MODEL").is_ok()
+            {
+                model_holder = Some(MigrationModel::Ollama(OllamaModel::from_env(
+                    args.ollama_model.clone(),
+                    args.ollama_url.clone(),
+                )?));
+            } else {
+                let model_name = args.groq_model.clone().or(persona.model.clone());
+                model_holder = Some(MigrationModel::Groq(GroqModel::from_env(model_name)?));
+            }
         }
-        let model_ref: Option<&(dyn codex_core::model::CodexModel + Send + Sync)> =
-            model_holder.as_ref().map(|m| m as &(dyn codex_core::model::CodexModel + Send + Sync));
+        let model_ref: Option<&(dyn CodexModel + Send + Sync)> = model_holder.as_ref().map(|m| {
+            match m {
+                MigrationModel::Groq(g) => g as &(dyn CodexModel + Send + Sync),
+                MigrationModel::Ollama(o) => o as &(dyn CodexModel + Send + Sync),
+            }
+        });
 
         println!("codex ▸ Planning migration {} → {} ...", from_lang, to_lang);
         let result = migrate::run_migration(&config, model_ref)?;
@@ -337,6 +456,48 @@ fn run_cli_logic(args: Args, mut engine: CodexEngine) -> Result<()> {
         println!("{}", response);
         return Ok(());
     }
+    if args.predict {
+        let response = engine.handle_input(":predict")?;
+        println!("{}", response);
+        return Ok(());
+    }
+    if args.hook {
+        let response = engine.handle_input(":hook")?;
+        println!("{}", response);
+        return Ok(());
+    }
+    if args.watch {
+        let root = args.root.clone().unwrap_or_else(|| PathBuf::from("."));
+        println!("\u{1f440} Astra Watch Mode \u{2014} monitoring {} for changes...", root.display());
+        println!("Press Ctrl+C to stop.\n");
+
+        // Index first
+        let _ = engine.handle_input(":index");
+
+        match astra_core::watch::start_watcher(&root) {
+            Ok((_watcher, rx)) => {
+                loop {
+                    match rx.recv() {
+                        Ok(alert) => {
+                            println!("{}", alert);
+                            let warnings = astra_core::watch::handle_file_change(
+                                engine.index_mut(),
+                                &alert,
+                            );
+                            for w in warnings {
+                                println!("{}", w);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("\u{274c} Failed to start watcher: {}", e);
+            }
+        }
+        return Ok(());
+    }
 
     // ── Handle free-form prompt ──────────────────────────────────────
     if !args.prompt.is_empty() {
@@ -365,21 +526,28 @@ fn load_env_file(path: PathBuf) {
     }
 }
 
+fn parse_team_role(role: &str) -> Result<TeamRole> {
+    match role.to_ascii_lowercase().as_str() {
+        "admin" => Ok(TeamRole::Admin),
+        "member" => Ok(TeamRole::Member),
+        _ => Err(anyhow::anyhow!("Unknown role: {}", role)),
+    }
+}
+
 fn run_repl(engine: &mut CodexEngine) -> Result<()> {
-    println!("────────────────────────────────────────");
-    println!(" codex v0.1.0 — conversational CLI");
-    println!("────────────────────────────────────────");
-    println!("Type what you want, like:");
-    println!("  migrate core/src from rs to ts into ./out --ai");
-    println!("  show project summary");
-    println!("  what do you remember about this repo?");
+    println!("{}", "╭──────────────────────────────────────────────────╮".dark_grey());
+    println!("{} {} {}", "│".dark_grey(), "🤖 Astra v0.1.0".cyan().bold(), "— Your codebase companion      │".dark_grey());
+    println!("{}", "╰──────────────────────────────────────────────────╯".dark_grey());
+    println!("{}", " Try `:index` to build the semantic graph, or ask:".dark_grey());
+    println!("{}", "  ? what does this project do?".dark_grey());
+    println!("{}", "  migrate core/src from rs to ts into ./out".dark_grey());
     println!();
 
     let mut input = String::new();
 
     loop {
         input.clear();
-        print!("\n› ");
+        print!("{} ", " You ❯".green().bold());
         io::stdout().flush()?;
 
         if io::stdin().read_line(&mut input)? == 0 {
@@ -387,12 +555,21 @@ fn run_repl(engine: &mut CodexEngine) -> Result<()> {
         }
 
         let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
             break;
         }
 
-        let reply = engine.handle_input(trimmed)?;
-        println!("𝙘𝙤𝙙𝙚𝙭 › {}", reply);
+        match engine.handle_input(trimmed) {
+            Ok(reply) => {
+                println!("\n{} {}\n", " Astra ❯".magenta().bold(), reply);
+            }
+            Err(e) => {
+                eprintln!("\n{} {}\n", " ❌ Error ❯".red().bold(), e);
+            }
+        }
     }
 
     Ok(())

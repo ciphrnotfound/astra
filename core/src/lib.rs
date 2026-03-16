@@ -15,3 +15,5 @@ pub mod health;
 pub mod time_travel;
 pub mod security;
 pub mod persona;
+pub mod watch;
+pub mod predict;

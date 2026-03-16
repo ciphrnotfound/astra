@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MemoryEntry {
     pub kind: String,
     pub content: String,
@@ -16,7 +16,7 @@ pub struct MemoryEntry {
     pub event: Option<MemoryEvent>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 pub enum MemoryEvent {
     IndexSnapshot {
@@ -36,12 +36,22 @@ pub enum MemoryEvent {
         lines_added: usize,
         lines_deleted: usize,
     },
+    WorktreeSnapshot {
+        changed_files: usize,
+        files: Vec<String>,
+    },
     HealthSnapshot {
         scores: HealthScores,
     },
+    GitCommit {
+        id: String,
+        summary: String,
+        author: String,
+        date: String,
+    },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct HealthScores {
     pub code_quality: u32,
     pub test_health: u32,
@@ -56,6 +66,8 @@ pub struct MemoryStore {
     pub entries: Vec<MemoryEntry>,
     #[serde(skip)]
     path: Option<PathBuf>,
+    #[serde(skip)]
+    max_entries: usize,
 }
 
 fn now_secs() -> u64 {
@@ -65,6 +77,10 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn default_max_entries() -> usize {
+    2000
+}
+
 impl MemoryStore {
     pub fn load(path: PathBuf) -> Self {
         let entries = if let Ok(data) = fs::read_to_string(&path) {
@@ -72,30 +88,31 @@ impl MemoryStore {
         } else {
             Vec::new()
         };
-        Self {
+        let mut store = Self {
             entries,
             path: Some(path),
-        }
+            max_entries: default_max_entries(),
+        };
+        store.trim_to_max();
+        store
     }
 
     pub fn add(&mut self, kind: &str, content: String) {
-        self.entries.push(MemoryEntry {
+        self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
             timestamp: now_secs(),
             event: None,
         });
-        let _ = self.save();
     }
 
     pub fn add_event(&mut self, kind: &str, content: String, event: MemoryEvent) {
-        self.entries.push(MemoryEntry {
+        self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
             timestamp: now_secs(),
             event: Some(event),
         });
-        let _ = self.save();
     }
 
     pub fn recent(&self, limit: usize) -> Vec<MemoryEntry> {
@@ -117,6 +134,78 @@ impl MemoryStore {
             .iter()
             .filter(|e| e.timestamp >= timestamp)
             .collect()
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+        let trimmed = query.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+
+        // Tokenize query, skipping common stop words
+        let stop_words = ["what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did", "how", "why", "where"];
+        let query_tokens: Vec<&str> = trimmed
+            .split_whitespace()
+            .filter(|w| !stop_words.contains(w) && w.len() > 1)
+            .collect();
+
+        if query_tokens.is_empty() {
+            // Fallback to basic substring if only stop words were provided
+            let needle = trimmed;
+            let mut matches = Vec::new();
+            for entry in self.entries.iter().rev() {
+                if entry.content.to_ascii_lowercase().contains(&needle) {
+                    matches.push(entry.clone());
+                    if matches.len() >= limit { break; }
+                }
+            }
+            return matches;
+        }
+
+        // Rank by match count
+        let mut scored_matches: Vec<(usize, MemoryEntry)> = self.entries.iter().rev().map(|entry| {
+            let content_lower = entry.content.to_ascii_lowercase();
+            let mut score = 0;
+            for token in &query_tokens {
+                if content_lower.contains(token) {
+                    score += 1;
+                }
+            }
+            (score, entry.clone())
+        }).filter(|(score, _)| *score > 0).collect();
+
+        // Sort by score (descending)
+        scored_matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+        scored_matches.into_iter().take(limit).map(|(_, e)| e).collect()
+    }
+
+    fn push_entry(&mut self, entry: MemoryEntry) {
+        if self.is_duplicate_of_last(&entry) {
+            return;
+        }
+        self.entries.push(entry);
+        self.trim_to_max();
+        let _ = self.save();
+    }
+
+    fn trim_to_max(&mut self) {
+        if self.max_entries == 0 {
+            return;
+        }
+        if self.entries.len() > self.max_entries {
+            let excess = self.entries.len() - self.max_entries;
+            self.entries.drain(0..excess);
+        }
+    }
+
+    fn is_duplicate_of_last(&self, entry: &MemoryEntry) -> bool {
+        match self.entries.last() {
+            Some(last) => last.kind == entry.kind
+                && last.content == entry.content
+                && last.event == entry.event,
+            None => false,
+        }
     }
 
     fn save(&self) -> Result<()> {
