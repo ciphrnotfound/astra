@@ -14,6 +14,13 @@
       "key": "astra_member_25016_1774029765568260700"
     }
   },
-  "tasks": {},
+  "tasks": {
+    "feat-101": {
+      "id": "feat-101",
+      "description": "Build the new login page",
+      "assignee": "Jeremy",
+      "status": "Pending"
+    }
+  },
   "sessions": []
 }
