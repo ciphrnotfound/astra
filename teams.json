@@ -1,36 +1,14 @@
 {
-  "team_name": "Alpha Team",
-  "admin_key": "team_api_key_123",
-  "api_key": "team_api_key_123",
+  "team_name": "Bothive",
+  "admin_key": "astra_admin_3040_1774029590630686400",
+  "api_key": "astra_admin_3040_1774029590630686400",
   "members": {
     "admin": {
       "name": "admin",
       "role": "Admin",
-      "key": "team_api_key_123"
+      "key": "astra_admin_3040_1774029590630686400"
     }
   },
-  "tasks": {
-    "auto-session-37880": {
-      "id": "auto-session-37880",
-      "description": "Implicit Codex Usage",
-      "assignee": "LENOVO",
-      "status": "InProgress"
-    }
-  },
-  "sessions": [
-    {
-      "task_id": "auto-session-37880",
-      "developer": "LENOVO",
-      "start_time": 1773134147,
-      "end_time": null,
-      "start_commit": "unknown",
-      "end_commit": null,
-      "lines_added": 0,
-      "lines_deleted": 0,
-      "prompts_asked": [
-        ":team init \"Bothive\""
-      ],
-      "files_touched": []
-    }
-  ]
+  "tasks": {},
+  "sessions": []
 }
