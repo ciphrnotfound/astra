@@ -3,15 +3,15 @@
   "admin_key": "astra_admin_3040_1774029590630686400",
   "api_key": "astra_admin_3040_1774029590630686400",
   "members": {
-    "admin": {
-      "name": "admin",
-      "role": "Admin",
-      "key": "astra_admin_3040_1774029590630686400"
-    },
     "Jeremy": {
       "name": "Jeremy",
       "role": "Member",
       "key": "astra_member_25016_1774029765568260700"
+    },
+    "admin": {
+      "name": "admin",
+      "role": "Admin",
+      "key": "astra_admin_3040_1774029590630686400"
     }
   },
   "tasks": {
@@ -19,8 +19,21 @@
       "id": "feat-101",
       "description": "Build the new login page",
       "assignee": "Jeremy",
-      "status": "Pending"
+      "status": "InProgress"
     }
   },
-  "sessions": []
+  "sessions": [
+    {
+      "task_id": "feat-101",
+      "developer": "Jeremy",
+      "start_time": 1774029842,
+      "end_time": null,
+      "start_commit": "cb6fe5d6c70b017e8d26fdd4d8809e1b36f17a7c",
+      "end_commit": null,
+      "lines_added": 0,
+      "lines_deleted": 0,
+      "prompts_asked": [],
+      "files_touched": []
+    }
+  ]
 }
