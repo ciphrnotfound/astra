@@ -1,4 +1,4 @@
-# Astra 🚀
+# Astra AI 🚀
 
 > **The CLI that knows your codebase better than you do**
 
