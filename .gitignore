@@ -102,3 +102,30 @@ gradle-app.setting
 
 # Misc
 check.json
+
+# User specified and sandbox removals
+out_go*/
+astra-landing/
+migration_output*/
+test_migration*
+test_v*/
+err*.txt
+build_*.txt
+compile_*.log
+check.txt
+check_output.txt
+migration_error.txt
+migration_log.txt
+test_panic.log
+test_cmds.txt
+tmp_src/
+my_app/
+express_server/
+calculator_backend/
+calculator_frontend/
+sandbox/
+codex-test/
+codex_ts_core*/
+derinfoods/
+out*/
+*.tgz

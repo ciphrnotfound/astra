@@ -1,13 +1,25 @@
 {
-  "name": "astra-cli",
+  "name": "astra-tui",
   "version": "0.1.0",
   "description": "A powerful conversational CLI for codebase analysis and autonomous refactoring.",
-  "main": "index.js",
+  "main": "bin/astra.js",
   "bin": {
     "astra": "./bin/astra.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:bin": "cargo build -p astra-cli --release",
+    "postinstall": "node ./bin/install.js",
+    "test": "echo \"No JS tests for wrapper\""
+  },
+  "files": [
+    "bin/",
+    "LICENSE",
+    "README.md",
+    "README_NPM.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ciphrnotfound/cli_codex.git"
   },
   "keywords": [
     "cli",
@@ -19,7 +31,6 @@
   ],
   "author": "Astra Team",
   "license": "MIT",
-  "dependencies": {},
   "engines": {
     "node": ">=16.0.0"
   }

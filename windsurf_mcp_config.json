@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "astra": {
+      "command": "C:\\Users\\LENOVO\\OneDrive\\Documents\\cli_codex\\target\\debug\\astra-cli.exe",
+      "args": [
+        "--env",
+        "C:\\Users\\LENOVO\\OneDrive\\Documents\\cli_codex\\.env",
+        "--root",
+        "C:\\Users\\LENOVO\\OneDrive\\Documents\\cli_codex",
+        "--mcp"
+      ],
+      "env": {}
+    }
+  }
+}

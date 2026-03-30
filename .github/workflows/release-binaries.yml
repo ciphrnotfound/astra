@@ -1,0 +1,77 @@
+name: release-binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            ext: exe
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            ext: bin
+          - os: macos-13
+            platform: darwin
+            arch: x64
+            ext: bin
+          - os: macos-14
+            platform: darwin
+            arch: arm64
+            ext: bin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          node -e "console.log(require('./package.json').version)" > VERSION
+          echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          EXPECTED="v${{ steps.version.outputs.value }}"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "Tag ($TAG) must match package.json version ($EXPECTED)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        shell: bash
+        run: cargo build -p astra-cli --release
+
+      - name: Prepare asset
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          NAME="astra-cli-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}.${{ matrix.ext }}"
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/release/astra-cli.exe" "dist/${NAME}"
+          else
+            cp "target/release/astra-cli" "dist/${NAME}"
+            chmod +x "dist/${NAME}"
+          fi
+          echo "ASSET_NAME=${NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.ASSET_NAME }}

@@ -2,8 +2,8 @@ use std::fmt::Write as FmtWrite;
 use anyhow::{anyhow, Result};
 
 use super::detect::Language;
-use super::mapping::LibraryRegistry;
-use crate::model::CodexModel;
+use super::mapping::{LibraryRegistry, ConceptRegistry};
+use crate::model::{CodexModel, SearchProvider};
 
 // ---------------------------------------------------------------------------
 // Translator trait
@@ -62,42 +62,117 @@ impl Translator for RuleBasedTranslator {
 
 pub struct AiTranslator<'a> {
     model: &'a (dyn CodexModel + Send + Sync),
+    search: Option<&'a (dyn SearchProvider + Send + Sync)>,
     registry: LibraryRegistry,
+    concepts: ConceptRegistry,
     knowledge: Option<String>,
 }
 
 impl<'a> AiTranslator<'a> {
-    pub fn new(model: &'a (dyn CodexModel + Send + Sync), knowledge: Option<String>) -> Self {
+    pub fn new(
+        model: &'a (dyn CodexModel + Send + Sync), 
+        search: Option<&'a (dyn SearchProvider + Send + Sync)>,
+        knowledge: Option<String>
+    ) -> Self {
         Self { 
             model,
+            search,
             registry: LibraryRegistry::new(),
+            concepts: ConceptRegistry::new(),
             knowledge,
         }
     }
 
-    fn build_mapping_context(&self, source_code: &str, to: Language) -> String {
+    fn build_mapping_context(&self, source_code: &str, from: Language, to: Language) -> String {
         let mut context = String::new();
-        // Detect common libraries (simple keyword check for now)
-        if source_code.contains("git2") {
-            if let Some(m) = self.registry.get("git2", to) {
-                let _ = writeln!(
-                    &mut context,
-                    "- Map Rust 'git2' to {}: {}. Import: '{}'. NOTE: {}",
-                    m.target_lib, to, m.import_path, m.notes
-                );
+
+        // 1. Standard Language Idioms (Concepts)
+        let mappings = self.concepts.get_mappings(from, to);
+        if !mappings.is_empty() {
+            let _ = writeln!(&mut context, "### REQUIRED {} TO {} IDIOMS:", from, to);
+            for m in mappings {
+                let _ = writeln!(&mut context, "- {}: {}", m.concept, m.pattern);
+            }
+            let _ = writeln!(&mut context);
+        }
+
+        // 2. Library-specific mappings
+        let _ = writeln!(&mut context, "### LIBRARY MAPPINGS:");
+        // Dynamically detect crates from `use xxx::` statements and emit known mappings
+        let mut emitted_libs = std::collections::HashSet::new();
+        for line in source_code.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") {
+                let parts: Vec<&str> = trimmed[4..].split("::").collect();
+                if !parts.is_empty() {
+                    let crate_name = parts[0].trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                    if !crate_name.is_empty() && !emitted_libs.contains(crate_name) {
+                        if let Some(m) = self.registry.get(crate_name, to) {
+                            let _ = writeln!(
+                                &mut context,
+                                "- Rust '{}' → {}: {}. Import: '{}'. NOTE: {}",
+                                crate_name, m.target_lib, to, m.import_path, m.notes
+                            );
+                            emitted_libs.insert(crate_name.to_string());
+                        }
+                    }
+                }
             }
         }
-        if source_code.contains("serde") {
-             if let Some(m) = self.registry.get("serde", to) {
-                let _ = writeln!(
-                    &mut context,
-                    "- Map Rust 'serde' to {}: {}. Import: '{}'. NOTE: {}",
-                    m.target_lib, to, m.import_path, m.notes
-                );
+
+        // 3. Autonomous Web Search Fallback for Unknown Dependencies
+        if from == Language::Rust && self.search.is_some() {
+            let mut unknown_crates = Vec::new();
+            let std_libs = ["std", "core", "alloc", "crate", "super", "self"];
+            
+            // Simple string scanning for `use xxx::`
+            for line in source_code.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("use ") {
+                    let parts: Vec<&str> = trimmed[4..].split("::").collect();
+                    if !parts.is_empty() {
+                        let crate_name = parts[0].trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                        if !crate_name.is_empty() 
+                            && !std_libs.contains(&crate_name) 
+                            && self.registry.get(crate_name, to).is_none() 
+                            && !unknown_crates.contains(&crate_name.to_string()) 
+                        {
+                            unknown_crates.push(crate_name.to_string());
+                        }
+                    }
+                }
+            }
+
+            if !unknown_crates.is_empty() {
+                let _ = writeln!(&mut context, "### \u{1f310} AUTONOMOUS RESEARCH RESULTS:");
+                for missing in unknown_crates.iter().take(3) { // Limit to top 3 to avoid spam
+                    println!(" \u{1f50e} Unknown dependency '{}' detected. Searching for {} equivalent...", missing, to);
+                    let query = format!("Idiomatic {} equivalent library or pattern for Rust crate '{}'", to, missing);
+                    if let Ok(results) = self.search.unwrap().search(&query) {
+                        // Ask LLM to summarize the search to save token space
+                        let summary_prompt = format!(
+                            "Based on these search results, what is the single MOST standard/idiomatic {} library equivalent to Rust's '{}'? \
+                             Give a 1-sentence answer with the npm package name or standard pattern to use.\n\n{}", 
+                            to, missing, &results[..results.len().min(1500)]
+                        );
+                        if let Ok(summary) = self.model.complete(&summary_prompt) {
+                            println!("   \u{21b3} Found: {}", summary.trim());
+                            let _ = writeln!(&mut context, "- For '{}', use: {}", missing, summary.trim());
+                        }
+                    }
+                }
+                let _ = writeln!(&mut context);
             }
         }
         if let Some(k) = &self.knowledge {
-            let _ = writeln!(&mut context, "- Use these learned patterns for {}:\n{}", to, k);
+            let truncated_k = if k.len() > 3000 {
+                let mut temp = k.chars().take(3000).collect::<String>();
+                temp.push_str("... [TRUNCATED]");
+                temp
+            } else {
+                k.clone()
+            };
+            let _ = writeln!(&mut context, "- Use these learned patterns for {}:\n{}", to, truncated_k);
         }
         context
     }
@@ -107,7 +182,7 @@ impl<'a> AiTranslator<'a> {
         let chunk_size = 10000;
         let overlap = 1000;
         
-        let mapping_context = self.build_mapping_context(source_code, to);
+        let mapping_context = self.build_mapping_context(source_code, from, to);
         
         let mut start = 0;
         let mut chunk_idx = 1;
@@ -115,21 +190,38 @@ impl<'a> AiTranslator<'a> {
             let end = (start + chunk_size).min(source_code.len());
             let chunk = &source_code[start..end];
             
-            let prompt = format!(
+            let system_prompt = format!(
                 "You are an expert code translator. You are translating a LARGE file in parts. This is Part {} of a {} to {} migration.\n\n\
-                 CRITICAL RULES:\n\
+                 RULES:\n\
                  - OUTPUT ONLY THE TRANSLATED {} CODE.\n\
+                 - NEVER hallucinate fake libraries or imports.\n\
                  - DO NOT include ANY {} code or explanations.\n\
-                 - DO NOT include markdown fences.\n\
-                 - Ensure Part {} connects logically to Part {}.\n\
-                 - Follow these library mapping rules:\n\
-                 {}\n\n\
-                 Source Chunk ({}, Part {}):\n{}\n",
-                chunk_idx, from, to, to, from, chunk_idx, chunk_idx - 1, mapping_context, from, chunk_idx, chunk
+                 - Ensure Part {} connects logically to Part {}.\n\n\
+                 {}",
+                chunk_idx, from, to, to, from, chunk_idx, chunk_idx - 1, mapping_context
             );
+
+            let user_msg = format!("Translate this source chunk (Part {}):\n{}", chunk_idx, chunk);
             
-            let translated_chunk = self.model.complete(&prompt)?;
-            let stripped = strip_markdown_fences(&translated_chunk);
+            // --- PASS 1: Initial Translation ---
+            let draft = self.model.complete_chat(&system_prompt, &user_msg)?;
+            let draft = strip_markdown_fences(&draft);
+
+            // --- PASS 2: Self-Correction Pass ---
+            let rewrite_system = format!(
+                "You are an expert {} Developer. Rewrite the ENTIRE code chunk below to FIX common migration errors.\n\
+                 Ensure it remains idiomatic {} and doesn't contain Rust syntax.\n\
+                 RULES:\n\
+                 1. You MUST rewrite and output the ENTIRE code chunk. Do not omit anything.\n\
+                 2. Do NOT output explanations or comments about fixes.\n\
+                 3. Output ONLY code, no markdown.",
+                to, to
+            );
+
+            let rewrite_user = format!("Review and fix this {} code chunk:\n\n{}", to, draft);
+            let final_chunk = self.model.complete_chat(&rewrite_system, &rewrite_user)?;
+            
+            let stripped = strip_markdown_fences(&final_chunk);
             result.push_str(&stripped);
             result.push('\n');
             
@@ -154,26 +246,55 @@ impl<'a> Translator for AiTranslator<'a> {
             return self.translate_in_chunks(source_code, from, to);
         }
 
-        let mapping_context = self.build_mapping_context(source_code, to);
+        let mapping_context = self.build_mapping_context(source_code, from, to);
 
-        let prompt = format!(
-            "You are an expert code translator. Translate the following {} code into idiomatic {}.\n\
-             Rules:\n\
-             - Preserve function names and signatures as closely as possible\n\
-             - Use idiomatic patterns for the target language\n\
-             - Do not add comments or explanations\n\
-             - Output ONLY the translated code, no markdown fences, no extra text\n\
-             - Translate ALL code in the file, not just functions\n\
-             - Do not omit logic, types, or control flow\n\
-             - Avoid TODO stubs or placeholder code\n\
-             - Map types idiomatically (e.g. string → &str/String, number → i32/f64, etc.)\n\
-             {}\n\
-             Source {} code:\n{}\n",
-            from, to, mapping_context, from, source_code
+        let system_prompt = format!(
+            "You are a world-class senior software engineer performing a {} to {} code migration.\n\n\
+             ABSOLUTE RULES (violations = failure):\n\
+             1. Output ONLY valid, compilable {} code. No markdown fences, no explanations, no comments about the translation.\n\
+             2. Translate ALL code. Every struct, impl, trait, function, and method MUST appear in the output.\n\
+             3. NEVER comment out code. NEVER leave TODO placeholders. Every Rust function must become a working {} function.\n\
+             4. NEVER hallucinate or invent libraries that don't exist.\n\
+             5. Rust structs become TypeScript classes with explicit field declarations and constructors.\n\
+             6. Rust 'impl' blocks become methods INSIDE the class body.\n\
+             7. Rust trait impls become 'class X implements Y'.\n\
+             8. Rust `HashMap<K, V>` becomes built-in JS `Map<K, V>`. NEVER import `Map` or `collections`.\n\
+             9. CRITICAL: Convert ALL `snake_case` methods AND parameters to `camelCase`. Examples: `execute_batch` -> `executeBatch`, `user_id` -> `userId`.\n\
+             10. Rust generic bounds `<S: Trait>` MUST become `<S extends Trait>` in TypeScript.\n\
+             11. CRITICAL: Rust Enums with data MUST become Discriminated Union `type`s. NEVER create a `class DatabaseError` or `class CustomError`.\n\
+             12. Arc<RwLock<T>> and Mutex<T> do NOT exist in TypeScript. Use plain Map/object. Add a `// Note: Concurrency lock removed` comment.\n\
+             13. All async fn must use 'async' keyword on method and return Promise<T>.\n\n\
+             {}",
+            from, to, to, to, mapping_context
         );
 
-        let raw = self.model.complete(&prompt)?;
-        Ok(strip_markdown_fences(&raw))
+        let user_msg = format!("Translate this {} code:\n{}", from, source_code);
+
+        // --- PASS 1: Initial Translation ---
+        let draft = self.model.complete_chat(&system_prompt, &user_msg)?;
+        let draft = strip_markdown_fences(&draft);
+
+        // --- PASS 2: Self-Correction Pass ---
+        let rewrite_system = format!(
+            "You are an expert {} Developer. Rewrite the ENTIRE provided code from top to bottom to FIX common migration errors.\n\n\
+             RECHECK AND FIX THESE ERRORS:\n\
+             1. NO 'async' keyword in interface methods (use Promise<T> return type).\n\
+             2. Enums with data MUST be Discriminated Union `type`s. IF YOU WROTE `class CustomError` or `class DatabaseError`, DELETE IT AND MAKE IT A UNION `type`.\n\
+             3. NO 'Option<T>' or 'Result<T, E>'. Use 'T | null' or Tuples.\n\
+             4. Generic static methods must have <T> on the method signature.\n\
+             5. CRITICAL: IF YOU HAVE ANY `snake_case` METHODS OR PARAMETERS (like `execute_batch` or `user_id`), RENAME THEM TO `camelCase` IMMEDIATELY.\n\
+             6. USE built-in JS `Map<K, V>`. If you added `import * as Map...`, DELETE THE IMPORT.\n\
+             7. Rust generic bounds `<S: Trait>` MUST become `<S extends Trait>`.\n\n\
+             RULES:\n\
+             - You MUST rewrite and output the ENTIRE file. Do not comment out or remove functionality.\n\
+             - Do NOT output explanations or markdown fences. Output ONLY the raw fixed {} code.",
+            to, to
+        );
+
+        let rewrite_user = format!("Review and fix this {} code:\n\n{}", to, draft);
+        let final_code = self.model.complete_chat(&rewrite_system, &rewrite_user)?;
+
+        Ok(strip_markdown_fences(&final_code))
     }
 }
 
@@ -187,10 +308,10 @@ pub struct HybridTranslator<'a> {
 }
 
 impl<'a> HybridTranslator<'a> {
-    pub fn new(model: Option<&'a (dyn CodexModel + Send + Sync)>, knowledge: Option<String>) -> Self {
+    pub fn new(model: Option<&'a (dyn CodexModel + Send + Sync)>, search: Option<&'a (dyn SearchProvider + Send + Sync)>, knowledge: Option<String>) -> Self {
         Self {
             rules: RuleBasedTranslator::new(),
-            ai: model.map(|m| AiTranslator::new(m, knowledge)),
+            ai: model.map(|m| AiTranslator::new(m, search, knowledge)),
         }
     }
 }
@@ -1967,17 +2088,101 @@ fn to_pascal_case(name: &str) -> String {
 
 fn strip_markdown_fences(text: &str) -> String {
     let mut s = text.trim().to_string();
+
+    // 1. Strip leading ```typescript / ```ts / ``` etc.
     if s.starts_with("```") {
         if let Some(pos) = s.find('\n') {
             s = s[pos + 1..].to_string();
         }
     }
+    
+    // 2. Strip trailing ``` fence
     if s.ends_with("```") {
         if let Some(pos) = s.rfind("```") {
             s = s[..pos].to_string();
         }
     }
-    s.trim().to_string()
+    
+    // 3. If there's a ``` in the middle (LLM closed code then wrote prose), cut at the fence
+    if let Some(pos) = s.find("\n```\n") {
+        s = s[..pos].to_string();
+    }
+    if let Some(pos) = s.find("\n```") {
+        if s[pos + 4..].trim_start().starts_with('\n') || s[pos + 4..].trim().is_empty() || !s[pos + 4..].trim().starts_with(|c: char| c == '{' || c == '(' || c == '[') {
+            s = s[..pos].to_string();
+        }
+    }
+
+    // 4. Strip trailing LLM commentary (lines that start with "This", "Note:", "The code", etc.)
+    let lines: Vec<&str> = s.lines().collect();
+    let mut end = lines.len();
+    while end > 0 {
+        let line = lines[end - 1].trim();
+        if line.is_empty() {
+            end -= 1;
+            continue;
+        }
+        // If the line looks like prose (starts with capital letter, no code-like syntax), strip it
+        let is_prose = !line.starts_with("//") 
+            && !line.starts_with("/*")
+            && !line.starts_with("import ")
+            && !line.starts_with("export ")
+            && !line.starts_with("class ")
+            && !line.starts_with("interface ")
+            && !line.starts_with("type ")
+            && !line.starts_with("function ")
+            && !line.starts_with("const ")
+            && !line.starts_with("let ")
+            && !line.starts_with("var ")
+            && !line.starts_with("async ")
+            && !line.starts_with("}")
+            && !line.starts_with(")")
+            && !line.starts_with("]")
+            && !line.starts_with("return ")
+            && !line.starts_with("throw ")
+            && !line.starts_with("await ")
+            && !line.starts_with("if ")
+            && !line.starts_with("else")
+            && !line.starts_with("for ")
+            && !line.starts_with("while ")
+            && !line.starts_with("switch ")
+            && !line.starts_with("case ")
+            && !line.starts_with("default:")
+            && !line.starts_with("try ")
+            && !line.starts_with("catch ")
+            && !line.starts_with("finally ")
+            && !line.starts_with("public ")
+            && !line.starts_with("private ")
+            && !line.starts_with("protected ")
+            && !line.starts_with("static ")
+            && !line.starts_with("readonly ")
+            && !line.starts_with("abstract ")
+            && !line.starts_with("@")
+            && !line.starts_with("  ")    // indented code
+            && !line.starts_with("\t")     // tab-indented code
+            && !line.starts_with("*")      // JSDoc
+            && (line.starts_with("This ") 
+                || line.starts_with("Note:")
+                || line.starts_with("Note ")
+                || line.starts_with("The ")
+                || line.starts_with("I ")
+                || line.starts_with("Some ")
+                || line.starts_with("However")
+                || line.starts_with("In ")
+                || line.starts_with("Here ")
+                || line.starts_with("Above ")
+                || line.starts_with("Below ")
+                || line.ends_with(".")
+                || line.ends_with(":")
+            );
+        if is_prose {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    
+    lines[..end].join("\n").trim().to_string()
 }
 
 // ===========================================================================

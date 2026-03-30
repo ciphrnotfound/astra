@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::git::GitRepo;
+use crate::config::get_global_config_path;
 
 /// Teams configuration and state.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -60,6 +61,10 @@ pub struct Session {
     pub end_commit: Option<String>,
     pub lines_added: usize,
     pub lines_deleted: usize,
+    #[serde(default)]
+    pub prompts_asked: Vec<String>,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
 }
 
 pub struct TeamManager {
@@ -346,7 +351,12 @@ impl TeamManager {
             end_commit: None,
             lines_added: 0,
             lines_deleted: 0,
+            prompts_asked: Vec::new(),
+            files_touched: Vec::new(),
         });
+
+        // Dynamic Context Injection for AI Editors
+        let _ = create_cursorrules(&self.repo_path, task_id, &task.description, developer);
 
         self.save_state(&state)
     }
@@ -397,6 +407,9 @@ impl TeamManager {
 
         state.sessions[session_idx] = session.clone();
         self.save_state(&state)?;
+
+        // Append to offline sync queue
+        let _ = enqueue_session_for_sync(&session);
 
         Ok(session)
     }
@@ -530,7 +543,12 @@ impl TeamManager {
             end_commit: None,
             lines_added: 0,
             lines_deleted: 0,
+            prompts_asked: Vec::new(),
+            files_touched: Vec::new(),
         });
+
+        // Dynamic Context Injection for AI Editors
+        let _ = create_cursorrules(&self.repo_path, task_id, &task.description, developer);
 
         self.save_state(&state)
     }
@@ -574,7 +592,19 @@ impl TeamManager {
         state.sessions[session_idx] = session.clone();
         self.save_state(&state)?;
 
+        // Append to offline sync queue
+        let _ = enqueue_session_for_sync(&session);
+
         Ok(session)
+    }
+
+    pub fn log_prompt(&self, developer: &str, prompt: &str) -> Result<()> {
+        let mut state = self.load_state()?;
+        if let Some(session) = state.sessions.iter_mut().find(|s| s.developer == developer && s.end_time.is_none()) {
+            session.prompts_asked.push(prompt.to_string());
+            self.save_state(&state)?;
+        }
+        Ok(())
     }
 
     fn require_admin(&self, state: &TeamState, admin_key: &str) -> Result<()> {
@@ -640,6 +670,20 @@ fn normalize_state(mut state: TeamState) -> TeamState {
     state
 }
 
+fn create_cursorrules(repo_path: &Path, task_id: &str, description: &str, assignee: &str) -> Result<()> {
+    let rules_path = repo_path.join(".cursorrules");
+    let content = format!(
+        "# ASTRA TEAM CONTEXT\n\
+         # You are assisting {} on TASK: {}\n\
+         # DESCRIPTION: {}\n\n\
+         # Context:\n\
+         # Please keep your suggestions aligned with the team's objectives mentioned above.\n",
+        assignee, task_id, description
+    );
+    fs::write(rules_path, content)?;
+    Ok(())
+}
+
 fn generate_key(prefix: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -648,3 +692,22 @@ fn generate_key(prefix: &str) -> String {
     let pid = std::process::id();
     format!("astra_{}_{}_{}", prefix, pid, now)
 }
+
+pub fn enqueue_session_for_sync(session: &Session) -> Result<()> {
+    let mut path = get_global_config_path();
+    path.set_file_name("sync_queue.json");
+    
+    let mut queue: Vec<Session> = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    
+    queue.push(session.clone());
+    
+    let content = serde_json::to_string_pretty(&queue)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+

@@ -106,22 +106,38 @@ impl Persona {
     /// Generates the system prompt to inject into the LLM context
     pub fn system_prompt(&self) -> String {
         let mut prompt = format!(
-            "Your name is {}. You must reply in the following language/tone: {}. ",
+            "You are {}, a highly-skilled Senior Staff Software Engineer and Architecture Expert. \
+             You must reply in the following language/tone: {}. \
+             CRITICAL RULES:\n\
+             1. Speak directly, clearly, and professionally. Do not be overly apologetic or subservient.\n\
+             2. Never invent facts, files, commands, APIs, or project history. If something is unknown, say it is unknown and propose how to verify it.\n\
+             3. Prefer grounded answers based on provided context and tool outputs. Distinguish clearly between confirmed facts and assumptions.\n\
+             4. Do not act like an AI chat bot; act like a human engineering peer.\n\
+             5. Never use dismissive or insulting phrasing toward the user (avoid lines like 'another question without context').\n\
+             6. Never force catchphrases, never open with sarcasm, and never add personality text that harms clarity.\n",
             self.name, self.language
         );
 
         if self.roast_level != "none" {
-            prompt.push_str(&format!("Your 'roast level' is {}. You should heavily critique, roast, and stylize your feedback according to this level. ", self.roast_level));
-        } else {
-            prompt.push_str("Be helpful, professional, and do not be excessively rude. ");
+            prompt.push_str(&format!("Your 'roast level' is {}. Critique code quality directly, but never belittle or mock the user. Keep responses constructive and practical. ", self.roast_level));
         }
 
         if !self.catchphrase.is_empty() {
-            prompt.push_str(&format!("Try to organically include your catchphrase: '{}'. ", self.catchphrase));
+            prompt.push_str(&format!("You may use this catchphrase only when contextually relevant and never as an opening line: '{}'. ", self.catchphrase));
         }
 
         prompt.push_str("Always stay in character. Never break character or acknowledge that you are an AI playing a character.");
         
         prompt
+    }
+
+    pub fn save(&self, root: &Path) -> std::io::Result<()> {
+        let dir = root.join(".astra");
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir)?;
+        }
+        let preferred = dir.join("persona.yaml");
+        let content = serde_yaml::to_string(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&preferred, content)
     }
 }

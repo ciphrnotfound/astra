@@ -22,6 +22,7 @@ pub struct MigrationConfig {
     pub to_lang: Language,
     pub use_ai: bool,
     pub use_clean: bool,
+    pub use_fix: bool,
     pub knowledge: Option<String>,
 }
 
@@ -85,6 +86,7 @@ impl MigrationResult {
 pub fn run_migration(
     config: &MigrationConfig,
     model: Option<&(dyn CodexModel + Send + Sync)>,
+    search: Option<&(dyn crate::model::SearchProvider + Send + Sync)>
 ) -> Result<MigrationResult> {
     let mut plan_text = String::new();
 
@@ -208,9 +210,9 @@ pub fn run_migration(
 
     // 3. Build the translator
     let translator = if use_ai_effective {
-        HybridTranslator::new(model, config.knowledge.clone())
+        HybridTranslator::new(model, search, config.knowledge.clone())
     } else {
-        HybridTranslator::new(None, None)
+        HybridTranslator::new(None, None, None)
     };
 
     // 4. Walk each file and translate
@@ -231,13 +233,20 @@ pub fn run_migration(
             .join("main")
             .join("java"),
         Language::React | Language::NextJs | Language::Vue | Language::Svelte => config.output_dir.join("src"),
+        Language::Cpp | Language::Assembly => config.output_dir.join("src"),
     };
     fs::create_dir_all(&src_subdir)?;
 
     for source_path in &source_files {
         // Map source path to output path
-        let relative = match source_path.strip_prefix(&config.source_dir) {
-            Ok(r) => r,
+        let mut relative = match source_path.strip_prefix(&config.source_dir) {
+            Ok(r) => {
+                if r.as_os_str().is_empty() {
+                    Path::new(source_path.file_name().unwrap())
+                } else {
+                    r
+                }
+            },
             Err(_) => {
                 skipped.push(SkippedFile {
                     path: source_path.clone(),
@@ -300,9 +309,17 @@ pub fn run_migration(
 
                 migrated.push(MigratedFile {
                     source: source_path.clone(),
-                    output: output_path,
+                    output: output_path.clone(),
                     lines,
                 });
+
+                // Auto-fix if requested
+                if config.use_fix {
+                    if let Some(m) = model {
+                        let fixer = super::fix::AutoFixer::new(m);
+                        let _ = fixer.fix(config.to_lang, &output_path);
+                    }
+                }
             }
             Err(e) => {
                 errors.push(MigrationError {

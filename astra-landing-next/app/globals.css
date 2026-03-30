@@ -1,0 +1,27 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --color-primary: #2F55FF;
+  --color-dark-navy: #0A0C10;
+  --font-dm-sans: var(--font-dm-sans);
+
+  --radius-lg: 0.75rem;
+  --radius-md: calc(0.75rem - 2px);
+  --radius-sm: calc(0.75rem - 4px);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-gray-200, currentColor);
+    scroll-behavior: smooth;
+  }
+}
+
+body {
+  font-family: var(--font-dm-sans);
+  background: #faf9f6;
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

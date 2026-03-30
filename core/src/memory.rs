@@ -7,6 +7,15 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LearningPhase {
+    pub language: String,
+    pub phase_number: u32,
+    pub goal: String,
+    pub path: String,
+    pub proficiency_notes: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MemoryEntry {
     pub kind: String,
     pub content: String,
@@ -49,6 +58,9 @@ pub enum MemoryEvent {
         author: String,
         date: String,
     },
+    LearningProgress {
+        phase: LearningPhase,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -78,7 +90,7 @@ fn now_secs() -> u64 {
 }
 
 fn default_max_entries() -> usize {
-    2000
+    0 // 0 denotes infinite entries
 }
 
 impl MemoryStore {
@@ -97,7 +109,11 @@ impl MemoryStore {
         store
     }
 
-    pub fn add(&mut self, kind: &str, content: String) {
+    pub fn add(&mut self, kind: &str, mut content: String) {
+        if content.len() > 5000 {
+            content = content.chars().take(5000).collect::<String>();
+            content.push_str("... [TRUNCATED]");
+        }
         self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
@@ -106,7 +122,11 @@ impl MemoryStore {
         });
     }
 
-    pub fn add_event(&mut self, kind: &str, content: String, event: MemoryEvent) {
+    pub fn add_event(&mut self, kind: &str, mut content: String, event: MemoryEvent) {
+        if content.len() > 5000 {
+            content = content.chars().take(5000).collect::<String>();
+            content.push_str("... [TRUNCATED]");
+        }
         self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
@@ -178,6 +198,19 @@ impl MemoryStore {
         scored_matches.sort_by(|a, b| b.0.cmp(&a.0));
 
         scored_matches.into_iter().take(limit).map(|(_, e)| e).collect()
+    }
+
+    pub fn compact_noise(&mut self) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|entry| !matches!(
+            entry.kind.as_str(),
+            "qa" | "qa-memory" | "web-search" | "web-knowledge" | "autonomous-action"
+        ));
+        let removed = before.saturating_sub(self.entries.len());
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
     }
 
     fn push_entry(&mut self, entry: MemoryEntry) {

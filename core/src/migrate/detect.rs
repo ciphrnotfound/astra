@@ -14,6 +14,8 @@ pub enum Language {
     NextJs,
     Vue,
     Svelte,
+    Cpp,
+    Assembly,
 }
 
 impl Language {
@@ -30,6 +32,8 @@ impl Language {
             Language::NextJs => &["jsx", "tsx"],
             Language::Vue => &["vue"],
             Language::Svelte => &["svelte"],
+            Language::Cpp => &["cpp", "hpp", "cc", "h", "cxx"],
+            Language::Assembly => &["asm", "s"],
         }
     }
 
@@ -46,6 +50,8 @@ impl Language {
             Language::NextJs => "tsx",
             Language::Vue => "vue",
             Language::Svelte => "svelte",
+            Language::Cpp => "cpp",
+            Language::Assembly => "asm",
         }
     }
 
@@ -62,6 +68,8 @@ impl Language {
             "next" | "nextjs" => Some(Language::NextJs),
             "vue" => Some(Language::Vue),
             "svelte" => Some(Language::Svelte),
+            "cpp" | "c++" => Some(Language::Cpp),
+            "asm" | "assembly" => Some(Language::Assembly),
             _ => None,
         }
     }
@@ -75,7 +83,13 @@ impl Language {
             Language::Rust => "cargo",
             Language::Java => "javac",
             Language::React | Language::NextJs | Language::Vue | Language::Svelte => "npm",
+            Language::Cpp => "g++",
+            Language::Assembly => "nasm",
         }
+    }
+
+    pub fn from_path(path: &Path) -> Language {
+        detect_language(path).unwrap_or(Language::TypeScript)
     }
 }
 
@@ -92,6 +106,8 @@ impl fmt::Display for Language {
             Language::NextJs => write!(f, "Next.js"),
             Language::Vue => write!(f, "Vue"),
             Language::Svelte => write!(f, "Svelte"),
+            Language::Cpp => write!(f, "C++"),
+            Language::Assembly => write!(f, "Assembly"),
         }
     }
 }
@@ -111,6 +127,8 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         Language::NextJs,
         Language::Vue,
         Language::Svelte,
+        Language::Cpp,
+        Language::Assembly,
     ];
     for lang in &all_languages {
         if lang.extensions().contains(&ext_lower.as_str()) {
@@ -141,13 +159,14 @@ const SKIP_DIRS: &[&str] = &[
     "obj",
 ];
 
-/// Recursively discover all source files for a given language in a directory.
 pub fn discover_source_files(
     path: &Path,
     lang: Language,
 ) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
-    if path.is_file() {
+    
+    // Check if the path points to an existing file directly
+    if path.is_file() || std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
         if let Some(detected) = detect_language(path) {
             if detected == lang {
                 files.push(path.to_path_buf());
@@ -159,6 +178,7 @@ pub fn discover_source_files(
     files.sort();
     files
 }
+
 
 fn discover_recursive(
     dir: &Path,

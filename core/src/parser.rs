@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use tree_sitter::{Language, Node, Parser, TreeCursor};
+use serde::{Deserialize, Serialize};
 use tree_sitter_go as ts_go;
 use tree_sitter_java as ts_java;
 use tree_sitter_javascript as ts_javascript;
@@ -9,11 +10,13 @@ use tree_sitter_python as ts_python;
 use tree_sitter_rust as ts_rust;
 use tree_sitter_typescript as ts_typescript;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ParsedSymbol {
     pub name: String,
     pub kind: ParsedSymbolKind,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ParsedSymbolKind {
     Function,
     Struct,
@@ -209,7 +212,7 @@ fn push_ts_variable_symbols(node: Node, source: &str, out: &mut Vec<ParsedSymbol
 // ---------------------------------------------------------------------------
 
 /// Represents a single import found in source code.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedImport {
     /// The module or path being imported (e.g. "std::fs", "./utils", "fmt")
     pub module: String,

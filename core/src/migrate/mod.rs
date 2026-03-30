@@ -4,6 +4,7 @@ pub mod scaffold;
 pub mod translate;
 pub mod clean;
 pub mod mapping;
+pub mod fix;
 
 pub use detect::Language;
 pub use orchestrate::{MigrationConfig, MigrationResult, run_migration};

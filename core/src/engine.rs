@@ -5,10 +5,12 @@ use std::process::Command;
 
 use anyhow::Result;
 
+use crate::agent::{self, AgentConfig};
+use crate::config::load_global_config;
 use crate::git::GitRepo;
 use crate::health;
 use crate::index::{is_indexable_path, CodeIndex};
-use crate::memory::{MemoryEvent, MemoryStore};
+use crate::memory::{MemoryEntry, MemoryEvent, MemoryStore};
 use crate::migrate;
 use crate::migrate::detect::Language;
 use crate::migrate::orchestrate::MigrationConfig;
@@ -20,6 +22,7 @@ use crate::scaffold;
 use crate::teams::TeamManager;
 use crate::time_travel;
 use crate::ts_migrate;
+use crate::workflow::WorkflowManager;
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -49,9 +52,35 @@ pub struct CodexEngine {
     memory: MemoryStore,
     git: Option<GitRepo>,
     persona: Persona,
+    agent_mode: bool,
+    auto_approve: bool,
 }
 
 impl CodexEngine {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn memory(&self) -> &MemoryStore {
+        &self.memory
+    }
+
+    pub fn memory_mut(&mut self) -> &mut MemoryStore {
+        &mut self.memory
+    }
+
+    pub fn index(&self) -> &CodeIndex {
+        &self.index
+    }
+
+    pub fn set_agent_mode(&mut self, enabled: bool) {
+        self.agent_mode = enabled;
+    }
+
+    pub fn set_auto_approve(&mut self, enabled: bool) {
+        self.auto_approve = enabled;
+    }
+
     pub fn new() -> Self {
         let root = PathBuf::from(".");
         let memory_path = resolve_memory_path(&root);
@@ -65,6 +94,8 @@ impl CodexEngine {
             memory: MemoryStore::load(memory_path),
             git,
             persona,
+            agent_mode: false,
+            auto_approve: false,
         }
     }
 
@@ -80,6 +111,8 @@ impl CodexEngine {
             memory: MemoryStore::load(memory_path),
             git,
             persona,
+            agent_mode: false,
+            auto_approve: false,
         }
     }
 
@@ -95,6 +128,8 @@ impl CodexEngine {
             memory: MemoryStore::load(memory_path),
             git,
             persona,
+            agent_mode: false,
+            auto_approve: false,
         }
     }
 
@@ -151,45 +186,25 @@ impl CodexEngine {
 
         self.record_git_commit();
         self.record_worktree_snapshot();
+ 
+        if let Some(cmd) = self.parse_natural_migrate_request(&normalized) {
+            return self.handle_input(&cmd);
+        }
 
-        if normalized.to_ascii_lowercase().starts_with("migrate ") {
-            let tokens: Vec<&str> = normalized.split_whitespace().collect();
-            if tokens.len() >= 8 {
-                let mut from_idx = None;
-                let mut to_idx = None;
-                let mut out_idx = None;
-                for (i, t) in tokens.iter().enumerate() {
-                    match *t {
-                        "from" if i + 1 < tokens.len() => from_idx = Some(i),
-                        "to" if i + 1 < tokens.len() => to_idx = Some(i),
-                        "output" if i + 1 < tokens.len() => out_idx = Some(i),
-                        _ => {}
-                    }
-                }
-                if let (Some(fi), Some(ti), Some(oi)) = (from_idx, to_idx, out_idx) {
-                    let src = tokens[1];
-                    let from_lang = tokens[fi + 1];
-                    let to_lang = tokens[ti + 1];
-                    let out_dir = tokens[oi + 1];
-                    let use_ai = tokens.iter().any(|t| *t == "--ai");
-                    let use_clean = tokens.iter().any(|t| *t == "--clean");
-                    let mut cmd = format!(
-                        ":migrate {} {} {} {}",
-                        src, from_lang, to_lang, out_dir
-                    );
-                    if use_ai {
-                        cmd.push_str(" --ai");
-                    }
-                    if use_clean {
-                        cmd.push_str(" --clean");
-                    }
-                    return self.handle_input(&cmd);
-                }
+        // Detect high-level planning goals BEFORE intent_for so broad objectives can be delegated.
+        if !trimmed.starts_with(':') {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("i want to")
+                || lower.starts_with("task:")
+                || lower.starts_with("build:")
+                || lower.starts_with("goal:")
+            {
+                return self.get_next_task(Some(trimmed));
             }
         }
 
         if let Some(cmd) = self.intent_for(trimmed) {
-            return self.handle_input(cmd);
+            return self.handle_input(&cmd);
         }
 
         if trimmed == ":index" {
@@ -234,6 +249,30 @@ impl CodexEngine {
                 },
             );
             return Ok(message);
+        }
+
+        if normalized.starts_with(":task") {
+            let goal = if normalized.len() > 5 {
+                Some(normalized[6..].trim())
+            } else {
+                None
+            };
+            if let Some(g) = goal {
+                return self.execute_task(g);
+            }
+            return self.get_next_task(None);
+        }
+
+        if trimmed == ":team status" {
+            return self.team_status_summary();
+        }
+
+        if trimmed == ":memory compact" {
+            let removed = self.memory.compact_noise();
+            return Ok(format!(
+                "🧠 Memory compacted. Removed {} noisy entries (qa/web/autonomous chatter).",
+                removed
+            ));
         }
 
         if let Some(rest) = trimmed.strip_prefix(":memory ") {
@@ -522,6 +561,7 @@ impl CodexEngine {
             let vibe_name = rest.trim();
             let persona = Persona::from_vibe(vibe_name);
             let display_name = persona.name.clone();
+            let _ = persona.save(&self.root);
             self.set_persona(persona);
             return Ok(format!("Vibe changed! You are now talking to {}.", display_name));
         }
@@ -915,12 +955,15 @@ impl CodexEngine {
                 to_lang,
                 use_ai,
                 use_clean,
+                use_fix: false,
                 knowledge,
             };
 
             let model_ref: Option<&(dyn CodexModel + Send + Sync)> =
                 self.model.as_ref().map(|m| m.as_ref());
-            let result = migrate::run_migration(&config, model_ref)?;
+            let search_ref: Option<&(dyn SearchProvider + Send + Sync)> =
+                self.search.as_ref().map(|s| s.as_ref());
+            let result = migrate::run_migration(&config, model_ref, search_ref)?;
 
             self.memory.add_event(
                 "migration",
@@ -943,6 +986,54 @@ impl CodexEngine {
             out.push_str(&result.scaffold_log);
             out.push_str(&result.summary());
             return Ok(out);
+        }
+
+        // ── :workflow generate|list|run — custom dynamic workflows ──
+        if trimmed == ":workflow list" {
+            let manager = WorkflowManager::new(&self.root);
+            match manager.list_workflows() {
+                Ok(wfs) => {
+                    if wfs.is_empty() {
+                        return Ok("No custom workflows found in .astra/workflows/".to_string());
+                    }
+                    let mut out = String::from("🛠️ **Available Workflows**\n");
+                    for w in wfs {
+                        out.push_str(&format!("  - {}\n", w));
+                    }
+                    return Ok(out);
+                }
+                Err(e) => return Ok(format!("Error listing workflows: {}", e)),
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(":workflow generate ") {
+            let desc = rest.trim();
+            if let Some(model) = &self.model {
+                let manager = WorkflowManager::new(&self.root);
+                match manager.generate_workflow(desc, model.as_ref()) {
+                    Ok(msg) => {
+                        self.memory.add("workflow", format!("Generated new workflow: {}", desc));
+                        return Ok(msg);
+                    }
+                    Err(e) => return Ok(format!("Failed to generate workflow: {}", e)),
+                }
+            } else {
+                return Ok("No LLM configured. Cannot generate workflow.".to_string());
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(":workflow run ") {
+            let mut parts = rest.split_whitespace();
+            let name = match parts.next() {
+                Some(n) => n,
+                None => return Ok("Usage: :workflow run <name> [args...]".to_string()),
+            };
+            let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+            let manager = WorkflowManager::new(&self.root);
+            match manager.execute_workflow(name, args) {
+                Ok(msg) => return Ok(msg),
+                Err(e) => return Ok(format!("Failed to execute workflow: {}", e)),
+            }
         }
 
         // ── :learn <language|fact> — research a language or store a fact ──
@@ -977,7 +1068,7 @@ impl CodexEngine {
 
             let mut out = String::from("\u{1f9e0} **Astra's Memory Bank**\n\n");
             for m in results {
-                let date = chrono::NaiveDateTime::from_timestamp_opt(m.timestamp as i64, 0)
+                let date = chrono::DateTime::from_timestamp(m.timestamp as i64, 0)
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
                 let _ = writeln!(&mut out, "\u{2022} **[{}]** ({}) — {}", m.kind.to_uppercase(), date, m.content);
@@ -1104,9 +1195,14 @@ impl CodexEngine {
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     let lower = filename.to_lowercase();
                     if lower.contains("readme") || lower.contains("vision") || lower == "cargo.toml" {
+                        let mut truncated_contents = contents.clone();
+                        if truncated_contents.len() > 1500 {
+                            truncated_contents.truncate(1500);
+                            truncated_contents.push_str("\n... [Truncated for LLM Context]");
+                        }
                         self.memory.add(
                             "source-doc",
-                            format!("File: {}\nContents:\n{}", filename, contents)
+                            format!("File: {}\nContents:\n{}", filename, truncated_contents)
                         );
                     }
                 }
@@ -1230,24 +1326,64 @@ impl CodexEngine {
     }
 
     fn answer_question(&mut self, question: &str) -> Result<String> {
+        if is_name_question(question) {
+            return Ok(format!("Your name is {}.", self.persona.name));
+        }
         if let Some(model) = &self.model {
             let stats = self.index.stats();
             let by_lang = self.index.files_by_language();
-            let mut matches = self.memory.search(question, 10); // Search memory more aggressively
-            let recent = self.memory.recent(5);
+            let mut matches = self
+                .memory
+                .search(question, 6)
+                .into_iter()
+                .filter(|entry| include_memory_entry_in_answer(entry, question))
+                .take(3)
+                .collect::<Vec<_>>();
+            let recent = self.memory.recent(3);
+
+            if stats.file_count == 0 {
+                if is_project_context_question(question) {
+                    return Ok(
+                        "I don’t have indexed project context yet, so I can’t reliably answer project-specific questions without guessing. Run `:index` first, then ask again."
+                            .to_string(),
+                    );
+                }
+                let low_context_prompt = format!(
+                    "You are Astra, a concise and respectful engineering assistant.\n\
+                     The project is not indexed yet (0 files), so do not claim repo-specific facts.\n\
+                     Rules:\n\
+                     - Answer the user's question directly.\n\
+                     - No sarcasm, no catchphrases, no personality filler.\n\
+                     - If the question requires project context, say to run :index.\n\
+                     - Never mention README/framework/tooling unless explicitly provided in this question.\n\n\
+                     User question: {}",
+                    question
+                );
+                let answer = model.complete(&low_context_prompt)?;
+                self.memory
+                    .add("qa", format!("Q: {}\nA: {}", question, answer));
+                return Ok(answer);
+            }
             
-            // --- NEW: Always prioritize project documentation (README/Vision) in context ---
-            let docs = self.memory.events_of_kind("source-doc");
-            for doc in docs.iter().rev().take(3) {
-                if !matches.iter().any(|m| m.content == doc.content) {
-                    matches.push((*doc).clone());
+            // --- Always prioritize project documentation (README/Vision) in context ---
+            if stats.file_count > 0 {
+                let docs = self.memory.events_of_kind("source-doc");
+                for doc in docs.iter().rev().take(1) {
+                    if !matches.iter().any(|m| m.content == doc.content) {
+                        let mut doc_clone = (*doc).clone();
+                        if doc_clone.content.len() > 800 {
+                            doc_clone.content.truncate(800);
+                            doc_clone.content.push_str("\n... [Truncated]");
+                        }
+                        matches.push(doc_clone);
+                    }
                 }
             }
             
-            // --- NEW: Add Git history context if relevant ---
-            if question.to_lowercase().contains("change") || question.to_lowercase().contains("commit") || question.to_lowercase().contains("history") {
+            // --- Add Git history context only if directly relevant ---
+            if question.to_lowercase().contains("commit") || question.to_lowercase().contains("history") {
                 let git_events = self.memory.events_of_kind("git-commit");
-                for evt in git_events.iter().rev().take(3) {
+                for evt in git_events.iter().rev().take(1) {
                     matches.push((*evt).clone());
                 }
             }
@@ -1266,16 +1402,71 @@ impl CodexEngine {
                 for entry in matches {
                     let _ = writeln!(&mut prompt, "- [{}] {}", entry.kind, entry.content);
                 }
-                let _ = writeln!(&mut prompt, "\nIf the memory contains personal info (like the user's name) or specific project goals, use them directly in your response.");
             }
             
             let _ = writeln!(&mut prompt, "\n### Project Stats:");
             let _ = writeln!(&mut prompt, "- Root: {:?}", self.root);
             let _ = writeln!(&mut prompt, "- Indexed: {} files, {} lines.", stats.file_count, stats.total_lines);
+            if !by_lang.is_empty() {
+                let mut top = by_lang.into_iter().collect::<Vec<_>>();
+                top.sort_by(|a, b| b.1.cmp(&a.1));
+                let top_str = top
+                    .into_iter()
+                    .take(4)
+                    .map(|(lang, count)| format!("{}={}", lang, count))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(&mut prompt, "- Top languages: {}", top_str);
+            }
+            if !recent.is_empty() {
+                let recent_kinds = recent
+                    .iter()
+                    .map(|e| e.kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(&mut prompt, "- Recent memory kinds: {}", recent_kinds);
+            }
+            let _ = writeln!(&mut prompt, "- Never reference README/framework details unless explicitly confirmed by indexed files or current tool output.");
+            let _ = writeln!(&mut prompt, "- Do not infer active tasks unless the user explicitly mentions a task in this conversation turn or a verified active task record is provided.");
+
+            // --- Autonomous Tool Calling: inject installed workflows ---
+            let wf_manager = WorkflowManager::new(&self.root);
+            let installed_tools = wf_manager.list_workflows_with_metadata().unwrap_or_default();
+            if !installed_tools.is_empty() {
+                let _ = writeln!(&mut prompt, "\n### YOUR INSTALLED TOOLS (you can trigger these):");
+                for (tool_name, description) in &installed_tools {
+                    let _ = writeln!(&mut prompt, "- {}: {}", tool_name, description);
+                }
+                let _ = writeln!(&mut prompt, "\nIMPORTANT RULES FOR TOOL USE:");
+                let _ = writeln!(&mut prompt, "- ONLY use a workflow tool if the user's request DIRECTLY MATCHES the tool's description above.");
+                let _ = writeln!(&mut prompt, "- If a tool matches and required args are present, return ONLY `:workflow run <tool_name> [args...]`.");
+                let _ = writeln!(&mut prompt, "- If required args are missing, do NOT guess; ask a concise follow-up question instead.");
+                let _ = writeln!(&mut prompt, "- For general code understanding, architecture, or questions, do NOT use workflow commands. Reply normally using indexed context.");
+            }
+            let _ = writeln!(&mut prompt, "\n### ACTIONS YOU CAN TAKE:");
+            let _ = writeln!(&mut prompt, "- To migrate code: return exactly `:migrate <source_dir> <from_lang> <to_lang> <output_dir> [--ai]` (e.g. `:migrate core/src rs py out --ai`)");
+            let _ = writeln!(&mut prompt, "- To automate something new: return exactly `:workflow generate <description>`");
+            let _ = writeln!(&mut prompt, "- Reasoning protocol: infer intent, check grounding, and choose either command execution or conversational response.");
+            let _ = writeln!(&mut prompt, "- For coding tasks: provide concise implementation reasoning, verify assumptions against project context, and avoid invented APIs or file paths.");
+            let _ = writeln!(&mut prompt, "- If the user explicitly asks to execute an action and arguments are sufficient, output ONLY the command starting with `:`.");
 
             let _ = writeln!(&mut prompt, "\nUser question/task: {}", question);
 
             let answer = model.complete(&prompt)?;
+
+            // --- Autonomous Interception: scan lines for command ---
+            for line in answer.lines() {
+                let text = line.trim().trim_matches('`');
+                if text.starts_with(":workflow run ")
+                    || text.starts_with(":workflow generate ")
+                    || text.starts_with(":workflow list")
+                    || text.starts_with(":migrate ")
+                    || text.starts_with(":task ")
+                {
+                    self.memory.add("autonomous-action", format!("Astra autonomously triggered: {}", text));
+                    return self.handle_input(text);
+                }
+            }
 
             // If the answer seems uncertain and we have web search, augment it
             let lower_answer = answer.to_ascii_lowercase();
@@ -1305,30 +1496,53 @@ impl CodexEngine {
             self.memory
                 .add("qa", format!("Q: {}\nA: {}", question, answer));
             Ok(answer)
+        } else if let Some(answer) = self.memory_answer(question) {
+            self.memory
+                .add("qa-memory", format!("Q: {}\nA: {}", question, answer));
+            Ok(answer)
         } else {
-            if let Some(answer) = self.memory_answer(question) {
-                self.memory
-                    .add("qa-memory", format!("Q: {}\nA: {}", question, answer));
-                Ok(answer)
-            } else {
-                Ok(
-                    "No language model is configured. Try :summary or :memory <query>."
-                        .to_string(),
-                )
-            }
+            Ok(
+                "No language model is configured. Try :summary or :memory <query>.".to_string(),
+            )
         }
     }
 
-    fn intent_for(&self, trimmed: &str) -> Option<&'static str> {
+    fn intent_for(&self, trimmed: &str) -> Option<String> {
         if trimmed.starts_with(':') || trimmed.starts_with("? ") {
             return None;
         }
+        if let Some(cmd) = self.parse_natural_migrate_request(trimmed) {
+            return Some(cmd);
+        }
+
         let lower = trimmed.to_ascii_lowercase();
+        if (
+            lower.contains("migrate")
+                || lower.contains("refactor")
+                || lower.contains("implement")
+                || lower.contains("fix ")
+                || lower.contains("write code")
+                || lower.contains("build feature")
+                || lower.contains("add feature")
+                || lower.contains("debug")
+                || lower.contains("create folder")
+                || lower.contains("create directory")
+                || lower.contains("create a folder")
+                || lower.contains("create a directory")
+                || lower.contains("add file")
+                || lower.contains("create file")
+                || lower.contains("write to file")
+                || lower.contains("then run")
+        )
+            && !trimmed.ends_with('?')
+        {
+            return Some(format!(":task {}", trimmed));
+        }
 
         if lower.contains("what do you remember")
             || (lower.contains("remember") && lower.contains("what"))
         {
-            return Some(":memory");
+            return Some(":memory".to_string());
         }
 
         if lower.contains("what do you know")
@@ -1336,24 +1550,46 @@ impl CodexEngine {
             || lower.contains("project info")
             || lower.contains("project information")
         {
-            return Some(":summary");
+            return Some(":summary".to_string());
+        }
+
+        if lower == "astra team status"
+            || lower == "team status"
+            || (lower.contains("team") && lower.contains("status"))
+        {
+            return Some(":team status".to_string());
+        }
+
+        if lower.starts_with("learn ")
+            || lower.contains("learn rust")
+            || lower.contains("learn go")
+            || lower.contains("learn python")
+            || lower.contains("learn typescript")
+            || lower.contains("teach me")
+        {
+            let topic = trimmed
+                .split_once("learn ")
+                .map(|(_, rest)| rest.trim())
+                .or_else(|| trimmed.split_once("teach me ").map(|(_, rest)| rest.trim()))
+                .unwrap_or(trimmed);
+            return Some(format!(":learn {}", topic));
         }
 
         if (lower.contains("how many") && lower.contains("file"))
             || lower.contains("files by language")
             || lower.contains("files-by-lang")
         {
-            return Some(":files-by-lang");
+            return Some(":files-by-lang".to_string());
         }
 
         if lower.contains("git repo") || lower.contains("git repository") {
-            return Some(":summary");
+            return Some(":summary".to_string());
         }
 
         if (lower.contains("how many") && lower.contains("commit"))
             || lower.contains("commit count")
         {
-            return Some(":git-commit-count");
+            return Some(":git-commit-count".to_string());
         }
 
         if lower.contains("last commit")
@@ -1363,18 +1599,243 @@ impl CodexEngine {
             || lower.contains("when did i commit")
             || lower.contains("when was my last commit")
         {
-            return Some(":git-last-commit");
+            return Some(":git-last-commit".to_string());
         }
 
         if lower.contains("health check") || lower == "health" {
-            return Some(":health");
+            return Some(":health".to_string());
         }
 
         if lower.contains("graph") || lower.contains("semantic graph") {
-            return Some(":graph");
+            return Some(":graph".to_string());
         }
 
+        if lower.contains("index codebase")
+            || lower.contains("index project")
+            || lower.contains("reindex")
+            || lower == "index"
+        {
+            return Some(":index".to_string());
+        }
+
+        if lower.contains("list workflows")
+            || lower.contains("show workflows")
+            || lower.contains("workflow list")
+        {
+            return Some(":workflow list".to_string());
+        }
+
+        if let Some(start) = lower.find("run workflow ") {
+            let args = trimmed[start + "run workflow ".len()..].trim();
+            if !args.is_empty() {
+                return Some(format!(":workflow run {}", args));
+            }
+        }
+
+        if lower.starts_with("generate workflow ") || lower.starts_with("create workflow ") {
+            let description = trimmed
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split_once(' '))
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(trimmed)
+                .trim();
+            if !description.is_empty() {
+                return Some(format!(":workflow generate {}", description));
+            }
+        }
+
+        if lower.contains("install hook") || lower.contains("setup hook") || lower == "hook" {
+            return Some(":hook".to_string());
+        }
+
+        if lower.contains("watch mode") || lower == "watch" {
+            return Some(":watch".to_string());
+        }
+
+        if lower.contains("predict") && (lower.contains("refactor") || lower.contains("debt") || lower.contains("drift")) {
+            return Some(":predict".to_string());
+        }
+
+        if lower.contains("list migrations") || lower.contains("show migrations") {
+            return Some(":migrations".to_string());
+        }
+
+
         None
+    }
+
+    fn team_status_summary(&self) -> Result<String> {
+        let team_mgr = TeamManager::new(&self.root);
+        let state = team_mgr.load_state()?;
+        if state.team_name.is_empty() {
+            return Ok("No team is initialized for this repository.".to_string());
+        }
+        let user = load_global_config()
+            .user
+            .unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local_dev".to_string()));
+        let normalize = |v: &str| v.trim().trim_start_matches('@').to_ascii_lowercase();
+        let user_norm = normalize(&user);
+        let is_member = state.members.keys().any(|name| normalize(name) == user_norm);
+        let mut out = String::new();
+        let _ = writeln!(&mut out, "👥 Team: {}", state.team_name);
+        let _ = writeln!(&mut out, "👤 User: {} (member: {})", user, is_member);
+        let my_open = state
+            .tasks
+            .values()
+            .filter(|t| normalize(&t.assignee) == user_norm)
+            .filter(|t| t.status != crate::teams::TaskStatus::Done)
+            .collect::<Vec<_>>();
+        let _ = writeln!(&mut out, "📌 Open tasks: {}", my_open.len());
+        for task in my_open.iter().take(5) {
+            let _ = writeln!(&mut out, "   - [{}] {}", task.id, task.description);
+        }
+        if let Some(active) = state
+            .sessions
+            .iter()
+            .find(|s| normalize(&s.developer) == user_norm && s.end_time.is_none())
+        {
+            let _ = writeln!(&mut out, "⏱️ Active session: {}", active.task_id);
+        }
+        Ok(out)
+    }
+
+    fn parse_natural_migrate_request(&self, input: &str) -> Option<String> {
+        let normalized = input
+            .replace("->", " to ")
+            .replace("=>", " to ")
+            .replace("→", " to ");
+        let tokens: Vec<String> = normalized
+            .split_whitespace()
+            .map(Self::clean_intent_token)
+            .filter(|t| !t.is_empty())
+            .collect();
+        if tokens.len() < 4 {
+            return None;
+        }
+        let action_idx = tokens.iter().position(|t| Self::is_migration_action(t))?;
+        let from_idx = tokens.iter().position(|t| t == "from");
+        let to_idx = tokens.iter().position(|t| t == "to");
+        let output_idx = tokens.iter().position(|t| Self::is_output_keyword(t));
+
+        let from_lang = tokens
+            .iter()
+            .position(|t| t == "from")
+            .and_then(|i| tokens.get(i + 1))
+            .and_then(|v| Language::from_str_loose(v))
+            .or_else(|| {
+                let langs: Vec<(usize, Language)> = tokens
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, t)| Language::from_str_loose(t).map(|l| (i, l)))
+                    .collect();
+                langs.first().map(|(_, l)| *l)
+            })?;
+        let to_lang = tokens
+            .iter()
+            .position(|t| t == "to")
+            .and_then(|i| tokens.get(i + 1))
+            .and_then(|v| Language::from_str_loose(v))
+            .or_else(|| {
+                let langs: Vec<(usize, Language)> = tokens
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, t)| Language::from_str_loose(t).map(|l| (i, l)))
+                    .collect();
+                langs.get(1).map(|(_, l)| *l)
+            })?;
+
+        let source = tokens
+            .iter()
+            .position(|t| Self::is_source_keyword(t))
+            .and_then(|i| tokens.get(i + 1).cloned())
+            .or_else(|| {
+                let upper_bound = from_idx
+                    .or(to_idx)
+                    .or(output_idx)
+                    .unwrap_or(tokens.len());
+                if action_idx + 1 >= upper_bound {
+                    return None;
+                }
+                let span = tokens[action_idx + 1..upper_bound]
+                    .iter()
+                    .filter(|t| !Self::is_noise_token(t) && !Self::is_output_keyword(t))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if span.is_empty() {
+                    None
+                } else {
+                    Some(span.join("_"))
+                }
+            })?;
+
+        let output = tokens
+            .iter()
+            .position(|t| Self::is_output_keyword(t))
+            .and_then(|i| tokens.get(i + 1))?
+            .clone();
+
+        let lower = normalized.to_ascii_lowercase();
+        let use_ai = tokens.iter().any(|t| t == "--ai" || t == "ai")
+            || lower.contains(" with ai")
+            || lower.contains(" using ai");
+        let use_clean = tokens.iter().any(|t| t == "--clean");
+
+        let mut cmd = format!(
+            ":migrate {} {} {} {}",
+            source,
+            Self::language_cli_token(from_lang),
+            Self::language_cli_token(to_lang),
+            output
+        );
+        if use_ai {
+            cmd.push_str(" --ai");
+        }
+        if use_clean {
+            cmd.push_str(" --clean");
+        }
+        Some(cmd)
+    }
+
+    fn clean_intent_token(token: &str) -> String {
+        token
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '\\' && c != '_' && c != '-' && c != '.')
+            .to_ascii_lowercase()
+    }
+
+    fn is_migration_action(token: &str) -> bool {
+        matches!(
+            token,
+            "migrate" | "convert" | "translate" | "port" | "rewrite" | "move"
+        )
+    }
+
+    fn is_source_keyword(token: &str) -> bool {
+        matches!(token, "source" | "src" | "path" | "input")
+    }
+
+    fn is_output_keyword(token: &str) -> bool {
+        matches!(token, "output" | "out" | "into" | "destination" | "dest" | "in")
+    }
+
+    fn is_noise_token(token: &str) -> bool {
+        matches!(token, "the" | "this" | "that" | "a" | "an" | "my")
+    }
+
+    fn language_cli_token(lang: Language) -> &'static str {
+        match lang {
+            Language::TypeScript => "ts",
+            Language::JavaScript => "js",
+            Language::Python => "py",
+            Language::Go => "go",
+            Language::Rust => "rs",
+            Language::Java => "java",
+            Language::React => "react",
+            Language::NextJs => "nextjs",
+            Language::Vue => "vue",
+            Language::Svelte => "svelte",
+            Language::Cpp => "cpp",
+            Language::Assembly => "asm",
+        }
     }
 
     fn record_worktree_snapshot(&mut self) {
@@ -1437,6 +1898,94 @@ impl CodexEngine {
             );
         }
     }
+
+    // --- Phase 2: Orchestrator Delegation ---
+    pub fn get_next_task(&mut self, goal: Option<&str>) -> Result<String> {
+        crate::orchestrator::generate_next_task(self, goal)
+    }
+
+    fn execute_task(&mut self, goal: &str) -> Result<String> {
+        if goal.trim().is_empty() {
+            return self.get_next_task(None);
+        }
+        let model = match &self.model {
+            Some(m) => m,
+            None => return self.get_next_task(Some(goal)),
+        };
+        let config = AgentConfig {
+            auto_approve: self.auto_approve,
+            max_iterations: 24,
+        };
+        let system_context = self.build_grounding_context();
+        let result = agent::run_agent_loop(
+            model.as_ref(),
+            goal,
+            &self.root,
+            &config,
+            &system_context,
+            self.search.as_deref().map(|s| s as &dyn SearchProvider),
+        )?;
+        self.memory
+            .add("task-execution", format!("TASK: {}\nRESULT: {}", goal, result));
+        Ok(result)
+    }
+
+    pub fn report_task_result(&mut self, task_id: &str, success: bool, details: &str) -> Result<String> {
+        crate::orchestrator::process_task_result(self, task_id, success, details)
+    }
+
+    /// Builds a comprehensive grounding context for external AI integrations (like MCP)
+    /// to ensure the agent doesn't hallucinate facts about the user or project.
+    pub fn build_grounding_context(&self) -> String {
+        let mut context = String::from("### GROUNDING CONTEXT (TREAT AS FACT)\n");
+
+        let cursorrules_path = self.root.join(".cursorrules");
+        if let Ok(contents) = fs::read_to_string(&cursorrules_path) {
+            let _ = writeln!(&mut context, "User/Team Context from .cursorrules:\n---\n{}---", contents.trim());
+        } else {
+            let _ = writeln!(&mut context, "User Identity: The user is {}", self.persona.name);
+        }
+
+        let readme_path = self.root.join("README.md");
+        if let Ok(contents) = fs::read_to_string(&readme_path) {
+            let truncated = if contents.len() > 500 { format!("{}...", &contents[..500]) } else { contents.clone() };
+            let _ = writeln!(&mut context, "\nProject Overview from README.md:\n---\n{}---", truncated.trim());
+        }
+
+        let stats = self.index.stats();
+        let _ = writeln!(&mut context, "\nCodebase Stats: {} files indexed, {} total lines.", stats.file_count, stats.total_lines);
+
+        let team_mgr = TeamManager::new(&self.root);
+        if let Ok(state) = team_mgr.load_state() {
+            if !state.team_name.is_empty() {
+                let user = load_global_config()
+                    .user
+                    .unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local_dev".to_string()));
+                let normalize = |v: &str| v.trim().trim_start_matches('@').to_ascii_lowercase();
+                let user_norm = normalize(&user);
+                let is_member = state.members.keys().any(|name| normalize(name) == user_norm);
+                let _ = writeln!(
+                    &mut context,
+                    "Team State: team='{}', user='{}', member={}",
+                    state.team_name, user, is_member
+                );
+                if is_member {
+                    let my_open = state
+                        .tasks
+                        .values()
+                        .filter(|t| normalize(&t.assignee) == user_norm)
+                        .filter(|t| t.status != crate::teams::TaskStatus::Done)
+                        .map(|t| format!("[{}] {}", t.id, t.description))
+                        .collect::<Vec<_>>();
+                    if !my_open.is_empty() {
+                        let _ = writeln!(&mut context, "My Open Team Tasks: {}", my_open.join(" | "));
+                    }
+                }
+            }
+        }
+
+        context
+    }
 }
 
 fn resolve_memory_path(root: &Path) -> PathBuf {
@@ -1453,4 +2002,145 @@ fn resolve_memory_path(root: &Path) -> PathBuf {
         return legacy;
     }
     preferred
+}
+
+fn is_project_context_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    let keywords = [
+        "project",
+        "repo",
+        "repository",
+        "codebase",
+        "agenda",
+        "tonight",
+        "our app",
+        "our service",
+        "this app",
+        "this project",
+        "here",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+fn is_name_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    lower.contains("what's my name")
+        || lower.contains("whats my name")
+        || lower.contains("what is my name")
+        || lower.contains("who am i")
+}
+
+fn include_memory_entry_in_answer(entry: &MemoryEntry, question: &str) -> bool {
+    let kind = entry.kind.as_str();
+    if matches!(
+        kind,
+        "qa"
+            | "qa-memory"
+            | "web-search"
+            | "web-knowledge"
+            | "autonomous-action"
+            | "task-execution"
+            | "orchestrator-delegated"
+            | "orchestrator-result"
+    ) {
+        return false;
+    }
+
+    if kind == "command" {
+        let lower_q = question.to_ascii_lowercase();
+        return lower_q.contains("command") || lower_q.contains("run");
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodexEngine;
+    use crate::memory::MemoryEntry;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_loose_natural_migration_request() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.parse_natural_migrate_request(
+            "convert auth service from rust to go into out_go with ai",
+        );
+        assert_eq!(cmd.as_deref(), Some(":migrate auth_service rs go out_go --ai"));
+    }
+
+    #[test]
+    fn parses_compact_migration_request_with_symbols() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.parse_natural_migrate_request(
+            "migrate core/src from rs -> py output out_py",
+        );
+        assert_eq!(cmd.as_deref(), Some(":migrate core/src rs py out_py"));
+    }
+
+    #[test]
+    fn routes_coding_intent_to_task_command() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.intent_for("write code to build feature for oauth login");
+        assert_eq!(
+            cmd.as_deref(),
+            Some(":task write code to build feature for oauth login")
+        );
+    }
+
+    #[test]
+    fn routes_folder_file_and_run_request_to_task_command() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let prompt = "Create a folder sandbox/auth_service and add sandbox/auth_service/main.rs with a minimal Rust HTTP server, then run cargo check";
+        let cmd = engine.intent_for(prompt);
+        assert_eq!(cmd.as_deref(), Some(":task Create a folder sandbox/auth_service and add sandbox/auth_service/main.rs with a minimal Rust HTTP server, then run cargo check"));
+    }
+
+    #[test]
+    fn routes_workflow_listing_intent() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.intent_for("show workflows");
+        assert_eq!(cmd.as_deref(), Some(":workflow list"));
+    }
+
+    #[test]
+    fn routes_learning_intent_to_learn_command() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.intent_for("teach me rust async patterns");
+        assert_eq!(cmd.as_deref(), Some(":learn rust async patterns"));
+    }
+
+    #[test]
+    fn routes_team_status_intent_to_command() {
+        let engine = CodexEngine::with_root(PathBuf::from("."));
+        let cmd = engine.intent_for("astra team status");
+        assert_eq!(cmd.as_deref(), Some(":team status"));
+    }
+
+    #[test]
+    fn detects_project_context_question() {
+        assert!(super::is_project_context_question("what's the agenda for this project tonight?"));
+        assert!(!super::is_project_context_question("how do I write a Rust iterator?"));
+    }
+
+    #[test]
+    fn detects_name_question() {
+        assert!(super::is_name_question("what's my name"));
+        assert!(super::is_name_question("who am i"));
+        assert!(!super::is_name_question("what's the project name"));
+    }
+
+    #[test]
+    fn excludes_qa_memory_from_answer_context() {
+        let entry = MemoryEntry {
+            kind: "qa".to_string(),
+            content: "old conversation".to_string(),
+            timestamp: 0,
+            event: None,
+        };
+        assert!(!super::include_memory_entry_in_answer(
+            &entry,
+            "what's on the agenda"
+        ));
+    }
 }

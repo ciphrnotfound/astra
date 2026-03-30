@@ -71,6 +71,9 @@ pub fn scaffold_project(output_dir: &Path, lang: Language) -> Result<String> {
         }
         Language::Python => scaffold_python(output_dir, &mut log)?,
         Language::Java => scaffold_java(output_dir, &mut log)?,
+        Language::Cpp | Language::Assembly => {
+            let _ = writeln!(&mut log, "  ⚠ Scaffolding for {} is not yet automated", lang);
+        }
     }
 
     Ok(log)

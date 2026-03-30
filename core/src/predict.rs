@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-
 use crate::git::GitRepo;
 use crate::index::CodeIndex;
 
@@ -143,12 +141,44 @@ fn detect_hot_files(git: &GitRepo, _root: &Path) -> Vec<Prediction> {
     predictions
 }
 
+fn is_valid_source_file(path: &Path) -> bool {
+    let path_str = path.to_string_lossy().to_lowercase();
+    
+    // Ignore migration output folders, .kiro specs, hidden folders, and build targets
+    if path_str.contains("out") 
+        || path_str.contains("migration") 
+        || path_str.contains(".kiro") 
+        || path_str.contains("node_modules") 
+        || path_str.contains("target") 
+        || path_str.contains(".git") {
+        return false;
+    }
+    
+    // Ignore non-source files
+    if path_str.ends_with(".lock") 
+        || path_str.ends_with(".toml") 
+        || path_str.ends_with(".md") 
+        || path_str.ends_with(".txt") 
+        || path_str.ends_with(".html") 
+        || path_str.ends_with(".json") 
+        || path_str.ends_with(".bak") 
+        || path_str.ends_with("license") 
+        || path_str.ends_with(".gitignore") {
+        return false;
+    }
+    
+    true
+}
+
 /// Detect files that have grown too large.
 fn detect_large_files(index: &CodeIndex) -> Vec<Prediction> {
     let mut predictions = Vec::new();
 
     let stats = index.all_file_stats();
     for (path, line_count, fn_count) in stats {
+        if !is_valid_source_file(&path) {
+            continue;
+        }
         if line_count > 1000 {
             predictions.push(Prediction {
                 severity: Severity::Critical,
@@ -185,7 +215,7 @@ fn detect_cross_language_drift(index: &CodeIndex) -> Vec<Prediction> {
 
     // Simple heuristic: files with the same stem in different languages
     for (path, line_count, _) in index.all_file_stats() {
-        if line_count == 0 {
+        if line_count == 0 || !is_valid_source_file(&path) {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -231,8 +261,8 @@ fn detect_orphaned_code(index: &CodeIndex) -> Vec<Prediction> {
     let mut predictions = Vec::new();
 
     for (path, line_count, _) in index.all_file_stats() {
-        if line_count < 20 {
-            continue; // Skip tiny files
+        if line_count < 20 || !is_valid_source_file(&path) {
+            continue; // Skip tiny files or non-source files
         }
         // Check if any other file imports this one
         let stem = path

@@ -1,12 +1,18 @@
 use std::fmt::Write as FmtWrite;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 pub trait CodexModel {
     fn complete(&self, prompt: &str) -> Result<String>;
+    /// Chat-style completion with separate system and user messages.
+    /// Default implementation falls back to `complete` with concatenation.
+    fn complete_chat(&self, system: &str, user: &str) -> Result<String> {
+        self.complete(&format!("{}\n\n{}", system, user))
+    }
 }
 
 pub trait SearchProvider {
@@ -30,6 +36,8 @@ pub struct TavilySearch {
     client: Client,
     api_key: String,
 }
+
+static GROQ_LAST_REQUEST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 impl TavilySearch {
     pub fn from_env() -> Result<Self> {
@@ -123,6 +131,49 @@ impl GroqModel {
         headers.insert(reqwest::header::CONTENT_TYPE, content_type);
         headers
     }
+
+    fn wait_for_request_slot(&self) {
+        let min_interval_ms = std::env::var("GROQ_MIN_REQUEST_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2500);
+        let min_interval = Duration::from_millis(min_interval_ms);
+        let gate = GROQ_LAST_REQUEST_AT.get_or_init(|| Mutex::new(None));
+
+        loop {
+            let sleep_for = {
+                let mut last = gate.lock().expect("request gate lock poisoned");
+                match *last {
+                    Some(prev) => {
+                        let elapsed = prev.elapsed();
+                        if elapsed >= min_interval {
+                            *last = Some(Instant::now());
+                            Duration::ZERO
+                        } else {
+                            min_interval - elapsed
+                        }
+                    }
+                    None => {
+                        *last = Some(Instant::now());
+                        Duration::ZERO
+                    }
+                }
+            };
+            if sleep_for.is_zero() {
+                break;
+            }
+            thread::sleep(sleep_for);
+        }
+    }
+
+    fn retry_after_delay(response: &reqwest::blocking::Response) -> Option<Duration> {
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+    }
 }
 
 impl OllamaModel {
@@ -182,19 +233,30 @@ struct OllamaGenerateResponse {
 
 impl CodexModel for GroqModel {
     fn complete(&self, prompt: &str) -> Result<String> {
+        self.complete_chat("You are a helpful coding assistant.", prompt)
+    }
+
+    fn complete_chat(&self, system: &str, user: &str) -> Result<String> {
         let body = GroqChatRequest {
             model: self.model.clone(),
-            messages: vec![GroqMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
+            messages: vec![
+                GroqMessage {
+                    role: "system".to_string(),
+                    content: system.to_string(),
+                },
+                GroqMessage {
+                    role: "user".to_string(),
+                    content: user.to_string(),
+                },
+            ],
         };
 
-        let mut delay = Duration::from_secs(2);
+        let mut delay = Duration::from_secs(3);
         let mut attempts = 0;
-        let max_attempts = 5;
+        let max_attempts = 3;
 
         loop {
+            self.wait_for_request_slot();
             let response = self
                 .client
                 .post(&self.endpoint)
@@ -215,8 +277,12 @@ impl CodexModel for GroqModel {
 
             if status.as_u16() == 429 && attempts < max_attempts {
                 attempts += 1;
-                eprintln!("  ⚠ Rate limited (429). Retrying in {:?} (attempt {}/{})", delay, attempts, max_attempts);
-                thread::sleep(delay);
+                let retry_delay = Self::retry_after_delay(&response).unwrap_or(delay);
+                eprintln!(
+                    "  ⚠ Rate limited (429). Retrying in {:?} (attempt {}/{})",
+                    retry_delay, attempts, max_attempts
+                );
+                thread::sleep(retry_delay);
                 delay *= 2;
                 continue;
             }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
+use serde::{Serialize, Deserialize};
+use anyhow::Result;
 
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -11,11 +13,13 @@ use crate::parser::{
     extract_go_imports, extract_java_imports, ParsedImport,
 };
 
+#[derive(Serialize, Deserialize)]
 pub struct CodeIndex {
     files: HashMap<PathBuf, FileSummary>,
     graph: SemanticGraph,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct FileSummary {
     pub line_count: usize,
     pub language: String,
@@ -24,7 +28,7 @@ pub struct FileSummary {
     pub imports: Vec<ParsedImport>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Struct,
@@ -35,7 +39,7 @@ pub enum SymbolKind {
     Constant,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SymbolSummary {
     pub name: String,
     pub kind: SymbolKind,
@@ -170,6 +174,18 @@ impl CodeIndex {
             })
             .collect()
     }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let data = serde_json::to_string(self)?;
+        std::fs::write(path, data)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let data = std::fs::read_to_string(path)?;
+        let index: Self = serde_json::from_str(&data)?;
+        Ok(index)
+    }
 }
 
 pub struct IndexStats {
@@ -203,19 +219,20 @@ fn language_for_path(path: &Path) -> String {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum GraphNode {
     File { path: PathBuf, language: String },
     Symbol { name: String, kind: SymbolKind, language: String },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum GraphEdge {
     Contains,
     Imports,
     References,
 }
 
+#[derive(Serialize, Deserialize)]
 struct SemanticGraph {
     graph: Graph<GraphNode, GraphEdge>,
     file_nodes: HashMap<PathBuf, NodeIndex>,
