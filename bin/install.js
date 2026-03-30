@@ -26,7 +26,7 @@ function platformKey() {
 function releaseBaseUrl() {
   if (process.env.ASTRA_DOWNLOAD_BASE_URL) return process.env.ASTRA_DOWNLOAD_BASE_URL;
   const tag = process.env.ASTRA_RELEASE_TAG || `v${version}`;
-  return `https://github.com/ciphrnotfound/cli_codex/releases/download/${tag}`;
+  return `https://github.com/ciphrnotfound/astra/releases/download/${tag}`;
 }
 
 function assetUrl() {

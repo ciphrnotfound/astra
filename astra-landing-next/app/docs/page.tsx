@@ -60,24 +60,95 @@ export default function DocsPage() {
 
           <div>
             <h2 className="text-2xl font-medium text-gray-900 mb-4 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
-              Getting Started
+              Installation
             </h2>
             <p className="text-gray-600 mb-4">
-              Ready to start migrating your code? Check out our installation guide and quick start tutorial:
+              Install Astra globally using npm:
+            </p>
+            <div className="bg-gray-900 text-white p-6 mb-6 font-mono text-sm">
+              <code>npm install -g @astra/cli</code>
+            </div>
+            <p className="text-gray-600 mb-4">
+              Or use npx to run without installing:
+            </p>
+            <div className="bg-gray-900 text-white p-6 mb-6 font-mono text-sm">
+              <code>npx @astra/cli migrate --from typescript --to rust</code>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-2xl font-medium text-gray-900 mb-4 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+              Quick Start
+            </h2>
+            <p className="text-gray-600 mb-4">
+              Migrate your first file in seconds:
+            </p>
+            <div className="space-y-4">
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-2">1. Initialize Astra in your project</p>
+                <div className="bg-gray-900 text-white p-4 font-mono text-sm">
+                  <code>astra init</code>
+                </div>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-2">2. Run a migration</p>
+                <div className="bg-gray-900 text-white p-4 font-mono text-sm">
+                  <code>astra migrate --from typescript --to rust src/</code>
+                </div>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-2">3. Review and apply changes</p>
+                <div className="bg-gray-900 text-white p-4 font-mono text-sm">
+                  <code>astra review</code>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-2xl font-medium text-gray-900 mb-4 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+              Common Commands
+            </h2>
+            <div className="space-y-3">
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra migrate</code>
+                <p className="text-sm text-gray-600 mt-2">Migrate code between languages</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra analyze</code>
+                <p className="text-sm text-gray-600 mt-2">Analyze codebase health and dependencies</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra sync</code>
+                <p className="text-sm text-gray-600 mt-2">Sync data to dashboard</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra health</code>
+                <p className="text-sm text-gray-600 mt-2">Check codebase health metrics</p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-2xl font-medium text-gray-900 mb-4 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+              Need Help?
+            </h2>
+            <p className="text-gray-600 mb-4">
+              Explore our comprehensive documentation or join our community:
             </p>
             <div className="flex gap-4">
               <Link
-                href="/docs/installation"
+                href="https://github.com/astra-cli/astra"
                 className="relative group overflow-hidden bg-gray-900 text-white px-6 py-3 text-sm font-medium transition-all hover:shadow-lg"
               >
-                <span className="relative z-10">Installation</span>
+                <span className="relative z-10">GitHub</span>
                 <div className="absolute inset-0 bg-gray-800 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300 ease-out origin-left" />
               </Link>
               <Link
-                href="/docs/quick-start"
+                href="/contact"
                 className="relative group overflow-hidden border border-gray-900 text-gray-900 px-6 py-3 text-sm font-medium transition-all hover:text-white"
               >
-                <span className="relative z-10">Quick Start</span>
+                <span className="relative z-10">Contact Support</span>
                 <div className="absolute inset-0 bg-gray-900 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
               </Link>
             </div>

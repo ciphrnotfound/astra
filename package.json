@@ -1,6 +1,6 @@
 {
   "name": "astra-tui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A powerful conversational CLI for codebase analysis and autonomous refactoring.",
   "main": "bin/astra.js",
   "bin": {
@@ -19,7 +19,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/ciphrnotfound/cli_codex.git"
+    "url": "git+https://github.com/ciphrnotfound/astra.git"
   },
   "keywords": [
     "cli",
@@ -29,9 +29,12 @@
     "codebase",
     "assistant"
   ],
-  "author": "Astra Team",
+  "author": "Shay Jeremy",
   "license": "MIT",
   "engines": {
     "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "astra-tui": "^0.1.0"
   }
 }

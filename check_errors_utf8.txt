@@ -1,0 +1,89 @@
+﻿cargo :     Checking 
+astra-core v0.1.0 (C:
+\Users\LENOVO\OneDriv
+e\Documents\cli_codex
+\core)
+At line:1 char:1
++ cargo check -p 
+astra-cli > 
+check_errors.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
+    + CategoryInfo   
+           : 
+NotSpecified    : (  
+  Checking as.    
+..cli_codex\core):S  
+  tring) [], 
+RemoteEx    ception
+    + 
+FullyQualifiedErr    
+orId : NativeComman  
+  dError
+ 
+warning: variable 
+does not need to be 
+mutable
+   --> core\src\migra
+te\orchestrate.rs:242
+:13
+    |
+242 |         let 
+mut relative = match 
+source_path.strip_pre
+fix(&config.source_di
+r) {
+    |             
+----^^^^^^^^
+    |             |
+    |             
+help: remove this 
+`mut`
+    |
+    = note: `#[warn(u
+nused_mut)]` (part 
+of 
+`#[warn(unused)]`) 
+on by default
+
+warning: unused 
+variable: `engine`
+   --> core\src\orche
+strator.rs:190:25
+    |
+190 | fn generate_rev
+iew_step(engine: 
+&mut CodexEngine, 
+task: 
+&OrchestratedTask) 
+-> Result<String> {
+    |                
+         ^^^^^^ 
+help: if this is 
+intentional, prefix 
+it with an 
+underscore: `_engine`
+    |
+    = note: `#[warn(u
+nused_variables)]` 
+(part of 
+`#[warn(unused)]`) 
+on by default
+
+warning: 
+`astra-core` (lib) 
+generated 2 warnings 
+(run `cargo fix 
+--lib -p astra-core` 
+to apply 2 
+suggestions)
+    Checking 
+astra-cli v0.1.0 (C:\
+Users\LENOVO\OneDrive
+\Documents\cli_codex\
+cli)
+    Finished `dev` 
+profile [unoptimized 
++ debuginfo] 
+target(s) in 10.37s
