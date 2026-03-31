@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,6 +81,8 @@ pub struct MemoryStore {
     path: Option<PathBuf>,
     #[serde(skip)]
     max_entries: usize,
+    #[serde(skip)]
+    pub global: Option<Box<MemoryStore>>,
 }
 
 fn now_secs() -> u64 {
@@ -104,9 +107,103 @@ impl MemoryStore {
             entries,
             path: Some(path),
             max_entries: default_max_entries(),
+            global: None,
         };
         store.trim_to_max();
         store
+    }
+
+    /// Attach a global memory store (loaded from ~/.astra/memory.json).
+    pub fn attach_global(&mut self, global: MemoryStore) {
+        self.global = Some(Box::new(global));
+    }
+
+    /// Returns the global memory path: ~/.astra/memory.json
+    pub fn global_memory_path() -> Option<PathBuf> {
+        let home = env::var("HOME")
+            .or_else(|_| env::var("USERPROFILE"))
+            .ok()?;
+        Some(PathBuf::from(home).join(".astra").join("memory.json"))
+    }
+
+    /// Load the global memory store from ~/.astra/memory.json.
+    pub fn load_global() -> Self {
+        if let Some(path) = Self::global_memory_path() {
+            Self::load(path)
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Check if this is the very first run (no global memory file exists).
+    pub fn is_first_run() -> bool {
+        match Self::global_memory_path() {
+            Some(path) => !path.exists(),
+            None => true,
+        }
+    }
+
+    /// Add a fact to global memory (identity, preferences).
+    pub fn add_global(&mut self, kind: &str, content: String) {
+        if let Some(global) = self.global.as_mut() {
+            global.add(kind, content);
+        }
+    }
+
+    /// Get the user's stored name from global memory, if any.
+    pub fn user_name(&self) -> Option<String> {
+        if let Some(global) = &self.global {
+            // Check "user-identity" facts first (from onboarding)
+            if let Some(entry) = global.entries.iter().rev().find(|e| e.kind == "user-identity") {
+                if let Some(name) = entry.content.strip_prefix("name: ") {
+                    return Some(name.to_string());
+                }
+            }
+            // Fallback: check "fact" entries that mention name
+            for entry in global.entries.iter().rev() {
+                if entry.kind == "fact" {
+                    let lower = entry.content.to_ascii_lowercase();
+                    if lower.starts_with("my name is ") {
+                        let name = entry.content["my name is ".len()..].trim().to_string();
+                        if !name.is_empty() {
+                            return Some(name);
+                        }
+                    }
+                }
+            }
+        }
+        // Also check local memory
+        for entry in self.entries.iter().rev() {
+            if entry.kind == "user-identity" {
+                if let Some(name) = entry.content.strip_prefix("name: ") {
+                    return Some(name.to_string());
+                }
+            }
+            if entry.kind == "fact" {
+                let lower = entry.content.to_ascii_lowercase();
+                if lower.starts_with("my name is ") {
+                    let name = entry.content["my name is ".len()..].trim().to_string();
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get a user preference from global memory by key.
+    pub fn user_preference(&self, key: &str) -> Option<String> {
+        if let Some(global) = &self.global {
+            for entry in global.entries.iter().rev() {
+                if entry.kind == "user-preference" {
+                    if let Some(val) = entry.content.strip_prefix(&format!("{}: ", key)) {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn add(&mut self, kind: &str, mut content: String) {
@@ -162,6 +259,12 @@ impl MemoryStore {
             return Vec::new();
         }
 
+        // Collect all entries: local + global
+        let mut all_entries: Vec<&MemoryEntry> = self.entries.iter().collect();
+        if let Some(global) = &self.global {
+            all_entries.extend(global.entries.iter());
+        }
+
         // Tokenize query, skipping common stop words
         let stop_words = ["what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did", "how", "why", "where"];
         let query_tokens: Vec<&str> = trimmed
@@ -173,9 +276,9 @@ impl MemoryStore {
             // Fallback to basic substring if only stop words were provided
             let needle = trimmed;
             let mut matches = Vec::new();
-            for entry in self.entries.iter().rev() {
+            for entry in all_entries.iter().rev() {
                 if entry.content.to_ascii_lowercase().contains(&needle) {
-                    matches.push(entry.clone());
+                    matches.push((*entry).clone());
                     if matches.len() >= limit { break; }
                 }
             }
@@ -183,7 +286,7 @@ impl MemoryStore {
         }
 
         // Rank by match count
-        let mut scored_matches: Vec<(usize, MemoryEntry)> = self.entries.iter().rev().map(|entry| {
+        let mut scored_matches: Vec<(usize, MemoryEntry)> = all_entries.iter().rev().map(|entry| {
             let content_lower = entry.content.to_ascii_lowercase();
             let mut score = 0;
             for token in &query_tokens {
@@ -191,7 +294,11 @@ impl MemoryStore {
                     score += 1;
                 }
             }
-            (score, entry.clone())
+            // Boost user-identity and user-preference entries
+            if entry.kind == "user-identity" || entry.kind == "user-preference" || entry.kind == "fact" {
+                score += 1;
+            }
+            (score, (*entry).clone())
         }).filter(|(score, _)| *score > 0).collect();
 
         // Sort by score (descending)

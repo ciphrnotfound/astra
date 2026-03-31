@@ -1,0 +1,226 @@
+﻿cargo :     Checking 
+astra-core v0.1.0 (C:
+\Users\LENOVO\OneDriv
+e\Documents\cli_codex
+\core)
+At line:1 char:1
++ cargo check -p 
+astra-core 2> 
+errors.txt
++ ~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo   
+           : 
+NotSpecified    : (  
+  Checking as.    
+..cli_codex\core):S  
+  tring) [], 
+RemoteEx    ception
+    + 
+FullyQualifiedErr    
+orId : NativeComman  
+  dError
+ 
+error[E0425]: cannot 
+find function 
+`thread_rng` in 
+crate `rand`
+   --> core\src\engin
+e.rs:210:34
+    |
+210 |              
+let mut rng = 
+rand::thread_rng();
+    |                
+                  
+^^^^^^^^^^ not found 
+in `rand`
+
+warning: unused 
+import: `rand::seq::S
+liceRandom`
+   --> core\src\engin
+e.rs:209:18
+    |
+209 |              
+use rand::seq::SliceR
+andom;
+    |                
+  ^^^^^^^^^^^^^^^^^^^
+^^^
+    |
+    = note: `#[warn(u
+nused_imports)]` 
+(part of 
+`#[warn(unused)]`) 
+on by default
+
+warning: unused 
+import: `PathBuf`
+ --> core\src\semanti
+c_graph.rs:3:23
+  |
+3 | use 
+std::path::{Path, 
+PathBuf};
+  |                  
+     ^^^^^^^
+
+warning: unused 
+import: `std::collect
+ions::HashMap`
+ --> core\src\semanti
+c_memory.rs:1:5
+  |
+1 | use std::collecti
+ons::HashMap;
+  |     ^^^^^^^^^^^^^
+^^^^^^^^^^^^
+
+warning: unused 
+import: `PathBuf`
+ --> core\src\semanti
+c_memory.rs:3:23
+  |
+3 | use 
+std::path::{Path, 
+PathBuf};
+  |                  
+     ^^^^^^^
+
+warning: unused 
+import: 
+`crate::git::GitRepo`
+ --> core\src\semanti
+c_memory.rs:8:5
+  |
+8 | use 
+crate::git::GitRepo;
+  |     
+^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no 
+method named 
+`choose` found for 
+array `[&str; 6]` in 
+the current scope
+   --> core\src\engin
+e.rs:211:37
+    |
+211 |              
+let chosen = greeting
+s.choose(&mut rng).un
+wrap_or(&"Ready.");
+    |                
+                     
+^^^^^^
+    |
+   ::: C:\Users\LENOV
+O\.cargo\registry\src
+\index.crates.io-1949
+cf8c6b5b557f\rand-0.1
+0.0\src\seq\slice.rs:
+52:8
+    |
+ 52 |     fn 
+choose<R>(&self, 
+rng: &mut R) -> 
+Option<&Self::Output>
+    |        ------ 
+the method is 
+available for 
+`[&str; 6]` here
+    |
+    = help: items 
+from traits can only 
+be used if the trait 
+is in scope
+help: trait 
+`IndexedRandom` 
+which provides 
+`choose` is 
+implemented but not 
+in scope; perhaps 
+you want to import it
+    |
+  1 + use rand::prelu
+de::IndexedRandom;
+    |
+help: there is a 
+method `choose_mut` 
+with a similar name
+    |
+211 |              
+let chosen = greeting
+s.choose_mut(&mut rng
+).unwrap_or(&"Ready."
+);
+    |                
+                     
+      ++++
+
+warning: variable 
+does not need to be 
+mutable
+   --> core\src\migra
+te\orchestrate.rs:242
+:13
+    |
+242 |         let 
+mut relative = match 
+source_path.strip_pre
+fix(&config.source_di
+r) {
+    |             
+----^^^^^^^^
+    |             |
+    |             
+help: remove this 
+`mut`
+    |
+    = note: `#[warn(u
+nused_mut)]` (part 
+of 
+`#[warn(unused)]`) 
+on by default
+
+warning: unused 
+variable: `engine`
+   --> core\src\orche
+strator.rs:190:25
+    |
+190 | fn generate_rev
+iew_step(engine: 
+&mut CodexEngine, 
+task: 
+&OrchestratedTask) 
+-> Result<String> {
+    |                
+         ^^^^^^ 
+help: if this is 
+intentional, prefix 
+it with an 
+underscore: `_engine`
+    |
+    = note: `#[warn(u
+nused_variables)]` 
+(part of 
+`#[warn(unused)]`) 
+on by default
+
+Some errors have 
+detailed 
+explanations: E0425, 
+E0599.
+For more information 
+about an error, try 
+`rustc --explain 
+E0425`.
+warning: 
+`astra-core` (lib) 
+generated 7 warnings
+error: could not 
+compile `astra-core` 
+(lib) due to 2 
+previous errors; 7 
+warnings emitted

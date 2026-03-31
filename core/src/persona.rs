@@ -32,6 +32,13 @@ impl Persona {
                 return persona;
             }
         }
+        
+        let global = crate::config::get_global_brain_path(root).join("persona.yaml");
+        if let Ok(contents) = fs::read_to_string(&global) {
+            if let Ok(persona) = serde_yaml::from_str::<Persona>(&contents) {
+                return persona;
+            }
+        }
         let previous = root.join(".forge").join("persona.yaml");
         if let Ok(contents) = fs::read_to_string(&previous) {
             if let Ok(persona) = serde_yaml::from_str::<Persona>(&contents) {
@@ -132,7 +139,13 @@ impl Persona {
     }
 
     pub fn save(&self, root: &Path) -> std::io::Result<()> {
-        let dir = root.join(".astra");
+        let local_dir = root.join(".astra");
+        let dir = if local_dir.exists() {
+            local_dir
+        } else {
+            crate::config::get_global_brain_path(root)
+        };
+        
         if !dir.exists() {
             std::fs::create_dir_all(&dir)?;
         }

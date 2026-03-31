@@ -638,9 +638,13 @@ impl TeamManager {
 }
 
 fn resolve_state_path(repo_path: &Path) -> PathBuf {
-    let preferred = repo_path.join(".astra").join("teams.json");
-    if preferred.exists() {
-        return preferred;
+    let local = repo_path.join(".astra").join("teams.json");
+    if local.exists() {
+        return local;
+    }
+    let global = crate::config::get_global_brain_path(repo_path).join("teams.json");
+    if global.exists() {
+        return global;
     }
     let previous = repo_path.join(".forge").join("teams.json");
     if previous.exists() {
@@ -650,7 +654,8 @@ fn resolve_state_path(repo_path: &Path) -> PathBuf {
     if legacy.exists() {
         return legacy;
     }
-    preferred
+    // Default to global brain for new team states to keep repos clean
+    global
 }
 
 fn normalize_state(mut state: TeamState) -> TeamState {

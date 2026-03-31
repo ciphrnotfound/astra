@@ -1,6 +1,6 @@
 [package]
 name = "astra-core"
- version = "0.1.0"
+version = "0.1.2"
  edition = "2021"
  
  [dependencies]
@@ -21,3 +21,4 @@ tree-sitter-java = "0.23"
 serde_yaml = "0.9.34"
 notify = "6"
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.10.0"

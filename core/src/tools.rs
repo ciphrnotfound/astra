@@ -186,6 +186,34 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                 required: true,
             }],
         },
+        ToolDef {
+            name: "get_file_owners".to_string(),
+            description: "Query the Temporal Graph to find out who really owns a file and their commit history.".to_string(),
+            parameters: vec![ToolParam {
+                name: "path".to_string(),
+                description: "The path of the file to query (e.g., core/src/engine.rs)".to_string(),
+                required: true,
+            }],
+        },
+        ToolDef {
+            name: "get_hidden_coupling".to_string(),
+            description: "Find out if files are secretly coupled and always change together based on historical commit data.".to_string(),
+            parameters: vec![],
+        },
+        ToolDef {
+            name: "get_file_timeline".to_string(),
+            description: "Get the full temporal story of a file: authors, staleness, and recent history.".to_string(),
+            parameters: vec![ToolParam {
+                name: "path".to_string(),
+                description: "The path of the file to query".to_string(),
+                required: true,
+            }],
+        },
+        ToolDef {
+            name: "get_semantic_concepts".to_string(),
+            description: "Retrieve Astra's high-level understanding of the project's risks, patterns, and architectural issues.".to_string(),
+            parameters: vec![],
+        },
     ]
 }
 
@@ -211,6 +239,10 @@ Tools:
 - move_path(src, dst) — Move or rename a file/dir
 - reason(thought) — SYSTEM 2: Think through logic before doing
 - research_web(query) — Search the web for latest info
+- get_file_owners(path) — Find out who really owns a file
+- get_hidden_coupling() — See files that frequently change together
+- get_file_timeline(path) — Get a file's history, authors, and staleness
+- get_semantic_concepts() — Learn the codebase's identified patterns, risks, and architectural rules
 "#)
 }
 
@@ -237,6 +269,10 @@ pub fn execute_tool(
         "move_path" => exec_move_path(call, project_root, auto_approve),
         "reason" => exec_reason(call),
         "research_web" => exec_research_web(call, searcher),
+        "get_file_owners" => exec_get_file_owners(call, project_root),
+        "get_hidden_coupling" => exec_get_hidden_coupling(project_root),
+        "get_file_timeline" => exec_get_file_timeline(call, project_root),
+        "get_semantic_concepts" => exec_get_semantic_concepts(project_root),
         _ => Err(anyhow!("Unknown tool: {}", call.name)),
     };
 
@@ -275,6 +311,52 @@ fn get_optional_str_arg(args: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 // ── Individual Tool Implementations ─────────────────────────────────────
+
+fn load_graph(root: &Path) -> Result<crate::semantic_graph::TemporalGraph> {
+    let global_brain = crate::config::get_global_brain_path(root);
+    crate::semantic_graph::TemporalGraph::load(&global_brain.join("temporal_graph.json"))
+        .map_err(|e| anyhow!("Temporal graph not available (run :index first): {}", e))
+}
+
+fn exec_get_file_owners(call: &ToolCall, project_root: &Path) -> Result<String> {
+    let path = get_str_arg(&call.arguments, "path")?;
+    let graph = load_graph(project_root)?;
+    if let Some(history) = graph.file_timeline(&path) {
+        let mut report = format!("File: {}\nPrimary Owner: {}\nTotal Commits: {}\nAuthors:\n",
+            history.path,
+            history.primary_owner.as_deref().unwrap_or("unknown"),
+            history.total_changes
+        );
+        for a in &history.authors {
+            report.push_str(&format!("  - {} ({} commits, {:.1}%)\n", a.name, a.commit_count, a.percentage));
+        }
+        Ok(report)
+    } else {
+        Ok(format!("Could not find temporal history for {}", path))
+    }
+}
+
+fn exec_get_hidden_coupling(project_root: &Path) -> Result<String> {
+    let graph = load_graph(project_root)?;
+    Ok(graph.coupling_report())
+}
+
+fn exec_get_file_timeline(call: &ToolCall, project_root: &Path) -> Result<String> {
+    let path = get_str_arg(&call.arguments, "path")?;
+    let graph = load_graph(project_root)?;
+    if let Some(report) = graph.why_report(&path) {
+        Ok(report)
+    } else {
+        Ok(format!("No timeline available for {}", path))
+    }
+}
+
+fn exec_get_semantic_concepts(project_root: &Path) -> Result<String> {
+    let global_brain = crate::config::get_global_brain_path(project_root);
+    let concepts = crate::semantic_memory::ConceptStore::load(&global_brain.join("concepts.json"))
+        .map_err(|e| anyhow!("Concepts not available (run :analyze first): {}", e))?;
+    Ok(format!("{}\n\n{}", concepts.concepts_report(), concepts.watches_report()))
+}
 
 fn exec_read_file(call: &ToolCall, project_root: &Path) -> Result<String> {
     let path_str = get_str_arg(&call.arguments, "path")?;
@@ -332,11 +414,56 @@ fn exec_edit_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> R
     }
 
     let original = fs::read_to_string(&path)?;
-    if !original.contains(&search) {
-        return Err(anyhow!(
-            "Search string not found in {}. The exact text must match.",
-            path.display()
-        ));
+    let mut modified = original.clone();
+    
+    if original.contains(&search) {
+        modified = original.replacen(&search, &replace, 1);
+    } else {
+        // Fallback: Fuzzy whitespace-agnostic line match
+        let search_lines: Vec<&str> = search.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let orig_lines: Vec<&str> = original.lines().collect();
+        let orig_trimmed: Vec<&str> = orig_lines.iter().map(|l| l.trim()).collect();
+        
+        let mut match_found = false;
+        if !search_lines.is_empty() {
+             for i in 0..=orig_trimmed.len().saturating_sub(search_lines.len()) {
+                 let mut matches = true;
+                 let mut s_idx = 0;
+                 let mut j_offset = 0;
+                 
+                 while s_idx < search_lines.len() && (i + j_offset) < orig_trimmed.len() {
+                     if orig_trimmed[i + j_offset].is_empty() {
+                         j_offset += 1;
+                         continue; // skip blank lines in original
+                     }
+                     if search_lines[s_idx] != orig_trimmed[i + j_offset] {
+                         matches = false;
+                         break;
+                     }
+                     s_idx += 1;
+                     j_offset += 1;
+                 }
+                 
+                 if matches && s_idx == search_lines.len() {
+                     let mut new_lines = Vec::new();
+                     new_lines.extend_from_slice(&orig_lines[..i]);
+                     new_lines.push(replace.as_str());
+                     if i + j_offset < orig_lines.len() {
+                         new_lines.extend_from_slice(&orig_lines[(i + j_offset)..]);
+                     }
+                     modified = new_lines.join("\n");
+                     match_found = true;
+                     break;
+                 }
+             }
+        }
+        
+        if !match_found {
+             return Err(anyhow!(
+                 "Search string not found in {}. Exact and whitespace-agnostic matching both failed.",
+                 path.display()
+             ));
+        }
     }
 
     if !auto_approve {
@@ -351,7 +478,6 @@ fn exec_edit_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> R
         }
     }
 
-    let modified = original.replacen(&search, &replace, 1);
     fs::write(&path, &modified)?;
     Ok(format!("✅ Edited {}", path.display()))
 }
