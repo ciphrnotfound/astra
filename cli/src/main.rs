@@ -11,7 +11,7 @@ use astra_core::engine::CodexEngine;
 use astra_core::migrate::detect::Language;
 use astra_core::migrate::orchestrate::MigrationConfig;
 use astra_core::migrate;
-use astra_core::model::{CodexModel, GroqModel, OllamaModel, TavilySearch};
+use astra_core::model::{CodexModel, GroqModel, OllamaModel, GeminiModel, OpenRouterModel, TavilySearch};
 use astra_core::teams::{TeamManager, TeamRole};
 use astra_core::tracker::SessionTracker;
 
@@ -39,6 +39,22 @@ struct Args {
     /// Groq model name override
     #[arg(long)]
     groq_model: Option<String>,
+
+    /// Enable the Gemini language model
+    #[arg(long)]
+    use_gemini: bool,
+
+    /// Gemini model name override
+    #[arg(long)]
+    gemini_model: Option<String>,
+
+    /// Enable the OpenRouter unified API
+    #[arg(long)]
+    use_openrouter: bool,
+
+    /// OpenRouter model name override
+    #[arg(long)]
+    openrouter_model: Option<String>,
 
     /// Enable the Ollama language model
     #[arg(long)]
@@ -279,6 +295,14 @@ fn main() -> Result<()> {
         let model = args.ollama_model.clone().or_else(|| std::env::var("OLLAMA_MODEL").ok());
         let ollama = OllamaModel::from_env(model, Some(ollama_url))?;
         engine.set_model(Box::new(ollama));
+    } else if args.use_gemini || std::env::var("GEMINI_API_KEY").is_ok() {
+        let model_name = args.gemini_model.clone().or_else(|| persona.model.clone());
+        let gemini = GeminiModel::from_env(model_name)?;
+        engine.set_model(Box::new(gemini));
+    } else if args.use_openrouter || std::env::var("OPENROUTER_API_KEY").is_ok() {
+        let model_name = args.openrouter_model.clone().or_else(|| persona.model.clone());
+        let openrouter = OpenRouterModel::from_env(model_name)?;
+        engine.set_model(Box::new(openrouter));
     } else if args.use_groq || std::env::var("GROQ_API_KEY").is_ok() {
         let model_name = args.groq_model.clone().or_else(|| persona.model.clone());
         let groq = GroqModel::from_env(model_name)?;
@@ -963,51 +987,90 @@ fn run_repl(engine: &mut CodexEngine, root: &Path) -> Result<()> {
         }
     }
     
-    // ── Infinite Memory Onboarding ──────────────────────────────────
-    // Check if this is a fresh project by looking for the memory file on disk
-    let astra_file = root.join(".astra").join("memory.json");
-    let legacy_file = root.join(".codex").join("memory.json");
-    let is_fresh = !astra_file.exists() && !legacy_file.exists();
-    
-    if is_fresh {
-        println!("\n{}", "✨ Astra is initializing in a new workspace!".yellow().bold());
-        println!("{}", "To build my infinite memory file, please tell me a bit about us.\n".dark_grey());
-        
-        // 1. Ask for name
-        print!("{} What is your name? ", " ❯".green().bold());
+    // ── Global First-Run Onboarding ──────────────────────────────────
+    // This only runs ONCE ever — when ~/.astra/memory.json doesn't exist yet
+    use astra_core::memory::MemoryStore;
+
+    if MemoryStore::is_first_run() {
+        println!("\n{}", "✨ Welcome to Astra — your AI-powered codebase companion!".yellow().bold());
+        println!("{}", "Let me learn a bit about you. This will be saved globally so I remember you everywhere.\n".dark_grey());
+
+        // 1. Name
+        print!("{} What's your name? ", " ❯".green().bold());
         io::stdout().flush()?;
         let mut name_input = String::new();
         io::stdin().read_line(&mut name_input)?;
         let name_val = name_input.trim();
         if !name_val.is_empty() {
-            let _ = engine.handle_input(&format!(":learn The developer's name is {}", name_val));
-            println!("  {} Noted: your name is {}.", "✓".green(), name_val);
+            engine.memory_mut().add_global("user-identity", format!("name: {}", name_val));
+            println!("  {} Nice to meet you, {}!", "✓".green(), name_val);
         }
 
-        // 2. Ask for project goals
-        print!("{} What is the goal of this project? ", " ❯".green().bold());
+        // 2. Preferred language
+        print!("{} What's your primary programming language? (e.g. rust, python, typescript) ", " ❯".green().bold());
+        io::stdout().flush()?;
+        let mut lang_input = String::new();
+        io::stdin().read_line(&mut lang_input)?;
+        let lang_val = lang_input.trim();
+        if !lang_val.is_empty() {
+            engine.memory_mut().add_global("user-preference", format!("language: {}", lang_val));
+            println!("  {} Got it — {} is your go-to.", "✓".green(), lang_val);
+        }
+
+        // 3. Vibe / personality
+        println!("{} What vibe should I use when talking to you?", " ❯".green().bold());
+        println!("    {} professional, casual, nigerian-pidgin, brutal, or just press Enter for default", "Options:".dark_grey());
+        print!("{} ", " ❯".green().bold());
+        io::stdout().flush()?;
+        let mut vibe_input = String::new();
+        io::stdin().read_line(&mut vibe_input)?;
+        let vibe_val = vibe_input.trim();
+        if !vibe_val.is_empty() {
+            engine.memory_mut().add_global("user-preference", format!("vibe: {}", vibe_val));
+            let persona = astra_core::persona::Persona::from_vibe(vibe_val);
+            let _ = persona.save(root);
+            engine.set_persona(persona);
+            println!("  {} Vibe set to: {}.", "✓".green(), vibe_val);
+        }
+
+        // 4. Reasoning depth
+        println!("{} How much reasoning should I show?", " ❯".green().bold());
+        println!("    {} concise (just answers), balanced (some reasoning), verbose (full chain-of-thought)", "Options:".dark_grey());
+        print!("{} ", " ❯".green().bold());
+        io::stdout().flush()?;
+        let mut reason_input = String::new();
+        io::stdin().read_line(&mut reason_input)?;
+        let reason_val = reason_input.trim();
+        if !reason_val.is_empty() {
+            engine.memory_mut().add_global("user-preference", format!("reasoning: {}", reason_val));
+            println!("  {} Reasoning level: {}.", "✓".green(), reason_val);
+        }
+
+        println!("\n{}", "🧠 Profile saved! I'll remember you across all projects.".magenta().bold());
+        println!("{}\n", "──────────────────────────────────────────────────".dark_grey());
+    } else if let Some(name) = engine.memory().user_name() {
+        // Greet returning user by name
+        println!("\n {} Welcome back, {}! 👋\n", "▸".cyan(), name);
+    }
+    
+    // ── Per-Project Onboarding ───────────────────────────────────────
+    // Only triggers when the project has no local memory yet
+    let astra_file = root.join(".astra").join("memory.json");
+    let legacy_file = root.join(".codex").join("memory.json");
+    let is_fresh_project = !astra_file.exists() && !legacy_file.exists();
+
+    if is_fresh_project {
+        println!("{}", "📁 New project detected! Tell me about it:".yellow());
+
+        print!("{} What is the goal of this project? (or press Enter to skip) ", " ❯".green().bold());
         io::stdout().flush()?;
         let mut goals_input = String::new();
         io::stdin().read_line(&mut goals_input)?;
         let goals_val = goals_input.trim();
         if !goals_val.is_empty() {
             let _ = engine.handle_input(&format!(":learn The core project goal is: {}", goals_val));
-            println!("  {} Noted: project goal saved.", "✓".green());
+            println!("  {} Project goal saved.", "✓".green());
         }
-
-        // 3. Ask for role
-        print!("{} What role should I play? (e.g. senior dev, tutor, architect) ", " ❯".green().bold());
-        io::stdout().flush()?;
-        let mut role_input = String::new();
-        io::stdin().read_line(&mut role_input)?;
-        let role_val = role_input.trim();
-        if !role_val.is_empty() {
-            let _ = engine.handle_input(&format!(":learn Astra's assigned role is: {}", role_val));
-            println!("  {} Noted: I will act as {}.", "✓".green(), role_val);
-        }
-
-        println!("\n{}", "🧠 Excellent. My persistent memory file has been created.".magenta().bold());
-        println!("{}", "I will auto-read it on every startup and every question to maintain infinite memory.".dark_grey());
         println!("{}\n", "──────────────────────────────────────────────────".dark_grey());
     }
 

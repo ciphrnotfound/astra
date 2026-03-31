@@ -187,7 +187,7 @@ fn inject_task_to_ide_context(root: &Path, task: &OrchestratedTask) -> Result<()
     Ok(())
 }
 
-fn generate_review_step(engine: &mut CodexEngine, task: &OrchestratedTask) -> Result<String> {
+fn generate_review_step(_engine: &mut CodexEngine, task: &OrchestratedTask) -> Result<String> {
     let plan = json!({
         "task_id": task.id,
         "title": format!("REVIEW: {}", task.title),

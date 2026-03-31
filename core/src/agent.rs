@@ -53,13 +53,13 @@ pub fn run_agent_loop(
     // Build a compact system prompt with tools
     let tools_block = tools::tools_prompt_block();
     let system = format!(
-        "{}\n\n{}\n\nRules:\n\
+        "{}\n\n{}\n\nRules (CRACKED SENIOR ENGINEER MODE):\n\
         1. REASON: Calibrate your thoughts first. Use `reason` to plan architecture.\n\
-        2. PATHS: Never assume where a file is. If `read_file` fails, use `search_codebase` or `list_dir` to find the correct path (e.g. `backend/main.py` vs `main.py`).\n\
-        3. FOLDERS: Only use `create_dir` for FOLDERS. For files, just use `write_file` (it creates parents automatically).\n\
-        4. RESEARCH: Use `research_web` only when local code/tools cannot answer the request. Do not use web search for routine coding tasks.\n\
+        2. NO PLACEHOLDERS: NEVER use `// rest of code here` or lazy placeholders. Write complete, production-ready code with full implementations. If writing a file, write the WHOLE file.\n\
+        3. PATHS: Never assume where a file is. If `read_file` fails, use `search_codebase` or `list_dir` to find the correct path.\n\
+        4. FOLDERS vs FILES: Only use `create_dir` for FOLDERS. For files, rely on `write_file` (creates parents automatically).\n\
         5. EFFICIENCY: Minimize model calls by batching multiple independent tool calls into one JSON response when possible.\n\
-        6. GROUNDING: Never invent file paths, command results, or tool outcomes. If uncertain, say what you need to verify and call tools.\n\
+        6. EXCELLENCE: Write expert-level, highly-optimized, properly typed and error-handled code. Do not skip edge cases.\n\
         7. IMPLEMENT: Use JSON `tool_calls` for all actions.\n\
         8. FINAL CHECK: Before giving a final response, ensure no recent tool call failed. If a tool failed, fix it first.\n\n\
         Example Turn:\n\

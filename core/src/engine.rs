@@ -18,6 +18,8 @@ use crate::migration;
 use crate::model::{CodexModel, SearchProvider};
 use crate::parser::{parse_rust_file, ParsedSymbolKind};
 use crate::persona::Persona;
+use crate::semantic_graph::TemporalGraph;
+use crate::semantic_memory::ConceptStore;
 use crate::scaffold;
 use crate::teams::TeamManager;
 use crate::time_travel;
@@ -54,6 +56,8 @@ pub struct CodexEngine {
     persona: Persona,
     agent_mode: bool,
     auto_approve: bool,
+    temporal_graph: TemporalGraph,
+    concept_store: ConceptStore,
 }
 
 impl CodexEngine {
@@ -86,16 +90,30 @@ impl CodexEngine {
         let memory_path = resolve_memory_path(&root);
         let git = GitRepo::discover(&root).ok();
         let persona = Persona::load(&root);
+        let mut memory = MemoryStore::load(memory_path);
+        memory.attach_global(MemoryStore::load_global());
+        
+        // Load Global Brain Storage
+        let global_brain = crate::config::get_global_brain_path(&root);
+        let temporal_graph = TemporalGraph::load(&global_brain.join("temporal_graph.json"))
+            .unwrap_or_else(|_| TemporalGraph::new());
+        let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
+            .unwrap_or_else(|_| ConceptStore::new());
+
+        register_global_project(&root);
+
         Self {
             root,
             index: CodeIndex::new(),
             model: None,
             search: None,
-            memory: MemoryStore::load(memory_path),
+            memory,
             git,
             persona,
             agent_mode: false,
             auto_approve: false,
+            temporal_graph,
+            concept_store,
         }
     }
 
@@ -103,16 +121,30 @@ impl CodexEngine {
         let memory_path = resolve_memory_path(&root);
         let git = GitRepo::discover(&root).ok();
         let persona = Persona::load(&root);
+        let mut memory = MemoryStore::load(memory_path);
+        memory.attach_global(MemoryStore::load_global());
+
+        // Load Global Brain Storage
+        let global_brain = crate::config::get_global_brain_path(&root);
+        let temporal_graph = TemporalGraph::load(&global_brain.join("temporal_graph.json"))
+            .unwrap_or_else(|_| TemporalGraph::new());
+        let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
+            .unwrap_or_else(|_| ConceptStore::new());
+
+        register_global_project(&root);
+
         Self {
             root,
             index: CodeIndex::new(),
             model: None,
             search: None,
-            memory: MemoryStore::load(memory_path),
+            memory,
             git,
             persona,
             agent_mode: false,
             auto_approve: false,
+            temporal_graph,
+            concept_store,
         }
     }
 
@@ -120,16 +152,30 @@ impl CodexEngine {
         let memory_path = resolve_memory_path(&root);
         let git = GitRepo::discover(&root).ok();
         let persona = Persona::load(&root);
+        let mut memory = MemoryStore::load(memory_path);
+        memory.attach_global(MemoryStore::load_global());
+
+        // Load Global Brain Storage
+        let global_brain = crate::config::get_global_brain_path(&root);
+        let temporal_graph = TemporalGraph::load(&global_brain.join("temporal_graph.json"))
+            .unwrap_or_else(|_| TemporalGraph::new());
+        let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
+            .unwrap_or_else(|_| ConceptStore::new());
+
+        register_global_project(&root);
+
         Self {
             root,
             index: CodeIndex::new(),
             model: Some(model),
             search: None,
-            memory: MemoryStore::load(memory_path),
+            memory,
             git,
             persona,
             agent_mode: false,
             auto_approve: false,
+            temporal_graph,
+            concept_store,
         }
     }
 
@@ -173,7 +219,7 @@ impl CodexEngine {
         Ok("Web search not available; using default AI knowledge.".to_string())
     }
 
-    pub fn handle_input(&mut self, input: &str) -> Result<String> {
+pub fn handle_input(&mut self, input: &str) -> Result<String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Ok("Say something about your codebase to get started.".to_string());
@@ -248,7 +294,91 @@ impl CodexEngine {
                     languages,
                 },
             );
+
+            // Enrich with Temporal Graph (zero API calls)
+            if let Some(git) = &self.git {
+                self.temporal_graph.enrich_from_git(git);
+                let dev_count = self.temporal_graph.developers.len();
+                let co_change_count = self.temporal_graph.co_changes.len();
+                message.push_str(&format!(
+                    " Temporal graph: {} developers, {} co-change pairs detected.",
+                    dev_count, co_change_count
+                ));
+
+                // Detect procedural patterns + set up watches (zero API calls)
+                self.concept_store.detect_patterns(&self.temporal_graph);
+                self.concept_store.check_watches(&self.temporal_graph);
+                let pattern_count = self.concept_store.patterns.len();
+                let watch_count = self.concept_store.watches.len();
+                if pattern_count > 0 || watch_count > 0 {
+                    message.push_str(&format!(
+                        " Semantic memory: {} patterns, {} watches.",
+                        pattern_count, watch_count
+                    ));
+                }
+
+                // Save temporal graph
+                let global_brain = crate::config::get_global_brain_path(&self.root);
+                let _ = self.temporal_graph.save(&global_brain.join("temporal_graph.json"));
+                let _ = self.concept_store.save(&global_brain.join("concepts.json"));
+            }
+
             return Ok(message);
+        }
+
+        // ── Semantic Graph + Memory Commands ─────────────────────────
+        if let Some(rest) = trimmed.strip_prefix(":why ") {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            match self.temporal_graph.why_report(rest.trim()) {
+                Some(report) => return Ok(report),
+                None => return Ok(format!("No history found for '{}'. Try a different path.", rest.trim())),
+            }
+        }
+
+        if trimmed == ":owners" {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            return Ok(self.temporal_graph.ownership_report());
+        }
+
+        if trimmed == ":coupling" {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            return Ok(self.temporal_graph.coupling_report());
+        }
+
+        if trimmed == ":concepts" {
+            return Ok(self.concept_store.concepts_report());
+        }
+
+        if trimmed == ":watches" {
+            return Ok(self.concept_store.watches_report());
+        }
+
+        if trimmed == ":analyze" {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            if let Some(model) = &self.model {
+                match self.concept_store.derive_concepts(&self.memory, &self.temporal_graph, model.as_ref()) {
+                    Ok(count) => {
+                        let global_brain = crate::config::get_global_brain_path(&self.root);
+                        let _ = self.concept_store.save(&global_brain.join("concepts.json"));
+                        return Ok(format!(
+                            "🧠 Derived {} new semantic concepts.\n\n{}",
+                            count,
+                            self.concept_store.concepts_report()
+                        ));
+                    }
+                    Err(e) => return Ok(format!("Concept extraction failed: {}", e)),
+                }
+            } else {
+                return Ok("No language model configured. Cannot run :analyze.".to_string());
+            }
         }
 
         if normalized.starts_with(":task") {
@@ -1046,7 +1176,13 @@ impl CodexEngine {
                     lang, &result[..result.len().min(2000)]
                 ));
             } else {
-                self.memory.add("fact", fact.to_string());
+                // Check if this is a personal/identity fact and save to global memory
+                let lower_fact = fact.to_ascii_lowercase();
+                if lower_fact.starts_with("my name is ") || lower_fact.starts_with("i am ") {
+                    self.memory.add_global("fact", fact.to_string());
+                } else {
+                    self.memory.add("fact", fact.to_string());
+                }
                 return Ok(format!(
                     "\u{1f9e0} **Memory Updated**\n\nI've stored this fact: \"{}\".\nI will remember this during future queries and migrations.",
                     fact
@@ -1151,6 +1287,8 @@ impl CodexEngine {
         }
 
         if !trimmed.starts_with(':') && !trimmed.starts_with("? ") {
+            // ── Auto-fact extraction: silently learn personal facts from conversation ──
+            self.auto_extract_facts(trimmed);
             return self.answer_question(trimmed);
         }
 
@@ -1327,7 +1465,66 @@ impl CodexEngine {
 
     fn answer_question(&mut self, question: &str) -> Result<String> {
         if is_name_question(question) {
-            return Ok(format!("Your name is {}.", self.persona.name));
+            if let Some(name) = self.memory.user_name() {
+                return Ok(format!("Your name is {}.", name));
+            }
+            return Ok("I don't know your name yet! Use `:learn my name is <your name>` to teach me.".to_string());
+        }
+
+        // ── Direct personal fact lookup — gather ALL identity facts ──
+        if is_personal_question(question) {
+            let mut all_facts: Vec<String> = Vec::new();
+            
+            // Gather from global memory
+            if let Some(global) = &self.memory.global {
+                for entry in &global.entries {
+                    if matches!(entry.kind.as_str(), "fact" | "user-identity" | "user-preference") {
+                        all_facts.push(format!("[{}] {}", entry.kind, entry.content));
+                    }
+                }
+            }
+            // Also gather from local memory
+            for entry in &self.memory.entries {
+                if entry.kind == "fact" || entry.kind == "user-identity" || entry.kind == "user-preference" {
+                    all_facts.push(format!("[{}] {}", entry.kind, entry.content));
+                }
+            }
+
+            if !all_facts.is_empty() {
+                // Use LLM to synthesize a natural answer if available
+                if let Some(model) = &self.model {
+                    let facts_text = all_facts.join("\n");
+                    let prompt = format!(
+                        "You are Astra, a helpful assistant. The user has asked a personal question.\n\
+                        \n\
+                        USER QUESTION: {}\n\
+                        \n\
+                        HERE ARE ALL THE FACTS YOU KNOW ABOUT THIS USER (TREAT AS GROUND TRUTH):\n\
+                        {}\n\
+                        \n\
+                        RULES:\n\
+                        - Answer the user's question using ONLY the facts above.\n\
+                        - Be direct and conversational. Do NOT say you don't have the information if it's in the facts.\n\
+                        - If the answer isn't in the facts, say what you DO know about them.\n\
+                        - Keep your response to 1-3 sentences max.",
+                        question, facts_text
+                    );
+                    match model.complete(&prompt) {
+                        Ok(answer) => return Ok(answer),
+                        Err(e) => {
+                            eprintln!("LLM Fact Synthesis Failed: {}", e);
+                            // fall through to raw facts
+                        }
+                    }
+                }
+
+                // Fallback: show raw facts if no LLM
+                let mut reply = String::from("Here's what I remember about you:\n");
+                for fact in &all_facts {
+                    reply.push_str(&format!("• {}\n", fact));
+                }
+                return Ok(reply);
+            }
         }
         if let Some(model) = &self.model {
             let stats = self.index.stats();
@@ -1395,10 +1592,26 @@ impl CodexEngine {
                 "\nYou are Astra, a local codebase assistant. Project root: {:?}.",
                 self.root
             );
+
+            // --- Inject user identity from global memory as hard facts ---
+            if let Some(name) = self.memory.user_name() {
+                let _ = writeln!(&mut prompt, "\n### USER IDENTITY (ABSOLUTE FACTS - NEVER CONTRADICT):");
+                let _ = writeln!(&mut prompt, "- The user's name is: {}", name);
+            }
+            // Inject any other global preferences/facts
+            if let Some(lang) = self.memory.user_preference("language") {
+                let _ = writeln!(&mut prompt, "- User's preferred language: {}", lang);
+            }
+            if let Some(reasoning) = self.memory.user_preference("reasoning") {
+                let _ = writeln!(&mut prompt, "- Reasoning depth preference: {}", reasoning);
+            }
             
             // Inject Memory context for "Proactive Triggering"
             if !matches.is_empty() {
-                let _ = writeln!(&mut prompt, "\n### IMPORTANT PROJECT MEMORY (PRIORITIZE THIS):");
+                let _ = writeln!(&mut prompt, "\n### MEMORY BANK (USE THESE FACTS TO ANSWER - DO NOT IGNORE):");
+                let _ = writeln!(&mut prompt, "The following are facts you have learned about the user and their project.");
+                let _ = writeln!(&mut prompt, "If the user asks about ANY of these facts, you MUST use them in your answer.");
+                let _ = writeln!(&mut prompt, "Do NOT say 'I don't have that information' if it appears below.");
                 for entry in matches {
                     let _ = writeln!(&mut prompt, "- [{}] {}", entry.kind, entry.content);
                 }
@@ -1508,8 +1721,18 @@ impl CodexEngine {
     }
 
     fn intent_for(&self, trimmed: &str) -> Option<String> {
+        let lower = trimmed.to_lowercase();
+        // Greetings/social should NOT be intercepted by intent rules.
+        if lower == "hey astra" || lower == "hello astra" || lower == "astra" || lower == "hey" || lower == "hi" {
+            return None;
+        }
+
         if trimmed.starts_with(':') || trimmed.starts_with("? ") {
             return None;
+        }
+        
+        if trimmed.starts_with('?') {
+             return Some(format!(":memory {}", &trimmed[1..].trim()));
         }
         if let Some(cmd) = self.parse_natural_migrate_request(trimmed) {
             return Some(cmd);
@@ -1943,7 +2166,8 @@ impl CodexEngine {
         if let Ok(contents) = fs::read_to_string(&cursorrules_path) {
             let _ = writeln!(&mut context, "User/Team Context from .cursorrules:\n---\n{}---", contents.trim());
         } else {
-            let _ = writeln!(&mut context, "User Identity: The user is {}", self.persona.name);
+            let user_name = self.memory.user_name().unwrap_or_else(|| "the user".to_string());
+            let _ = writeln!(&mut context, "User Identity: The user is {}", user_name);
         }
 
         let readme_path = self.root.join("README.md");
@@ -1986,13 +2210,86 @@ impl CodexEngine {
 
         context
     }
+
+    /// Automatically extract personal facts from casual user messages and store them globally.
+    fn auto_extract_facts(&mut self, input: &str) {
+        let lower = input.trim().to_ascii_lowercase();
+        
+        // Don't extract from questions
+        if lower.ends_with('?') || lower.len() < 8 {
+            return;
+        }
+
+        // Patterns that indicate a personal fact — we search for these ANYWHERE in the input
+        let identity_patterns = [
+            "my name is ",
+            "i'm called ",
+            "call me ",
+            "i am ",
+            "i'm ",
+            "my age is ",
+            "i like ",
+            "i love ",
+            "i prefer ",
+            "i use ",
+            "i live in ",
+            "i work at ",
+            "i work as ",
+            "my favorite ",
+            "my favourite ",
+            "i speak ",
+            "i'm from ",
+            "i am from ",
+            "turning ",
+            "years old",
+            "my birthday ",
+        ];
+
+        let mut extracted: Vec<String> = Vec::new();
+
+        for pattern in &identity_patterns {
+            if let Some(pos) = lower.find(pattern) {
+                // Extract a reasonable chunk: from pattern start to end of sentence or 80 chars
+                let start = pos;
+                let remaining = &input.trim()[start..];
+                // Find end: next period, comma that ends a clause, "and" boundary, or end
+                let end = remaining.len().min(80);
+                let fact = remaining[..end].trim().to_string();
+                
+                if fact.len() >= 6 {
+                    // Check for duplicates
+                    let fact_lower = fact.to_ascii_lowercase();
+                    let existing = self.memory.search(&fact, 3);
+                    let already_known = existing.iter().any(|e| {
+                        e.kind == "fact" && e.content.to_ascii_lowercase().contains(&fact_lower)
+                    });
+                    if !already_known && !extracted.iter().any(|e| e.to_ascii_lowercase() == fact_lower) {
+                        extracted.push(fact);
+                    }
+                }
+            }
+        }
+
+        // Store all extracted facts globally
+        for fact in extracted {
+            self.memory.add_global("fact", fact);
+        }
+    }
 }
 
 fn resolve_memory_path(root: &Path) -> PathBuf {
-    let preferred = root.join(".astra").join("memory.json");
+    let global_brain = crate::config::get_global_brain_path(root);
+    let preferred = global_brain.join("episodic_memory.json");
     if preferred.exists() {
         return preferred;
     }
+    
+    // Fallback exactly to local .astra if it has history there
+    let local = root.join(".astra").join("memory.json");
+    if local.exists() {
+        return local;
+    }
+    
     let previous = root.join(".forge").join("memory.json");
     if previous.exists() {
         return previous;
@@ -2002,6 +2299,31 @@ fn resolve_memory_path(root: &Path) -> PathBuf {
         return legacy;
     }
     preferred
+}
+
+fn register_global_project(root: &Path) {
+    use std::fs;
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    
+    let registry_path = home.join(".astra").join("registry.json");
+    let mut registry: serde_json::Value = match fs::read_to_string(&registry_path) {
+        Ok(c) => serde_json::from_str(&c).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    
+    if let Some(obj) = registry.as_object_mut() {
+        let abs_path = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let id = crate::config::get_global_project_id(root);
+        obj.insert(id, serde_json::json!(abs_path.to_string_lossy().to_string()));
+    }
+    
+    if let Some(parent) = registry_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(registry_path, serde_json::to_string_pretty(&registry).unwrap_or_default());
 }
 
 fn is_project_context_question(question: &str) -> bool {
@@ -2028,6 +2350,52 @@ fn is_name_question(question: &str) -> bool {
         || lower.contains("whats my name")
         || lower.contains("what is my name")
         || lower.contains("who am i")
+}
+
+fn is_personal_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    let personal_keywords = [
+        // Age
+        "how old",
+        "my age",
+        "age am i",
+        "years old",
+        // Birthday
+        "my birthday",
+        "when was i born",
+        "born on",
+        // Location
+        "where do i live",
+        "where am i from",
+        "where i live",
+        // Preferences
+        "what do i like",
+        "what do i prefer",
+        "what do i use",
+        "what language do i",
+        "what's my favorite",
+        "whats my favorite",
+        "what is my favorite",
+        "what is my favourite",
+        // General recall
+        "tell me about myself",
+        "what do you know about me",
+        "what do you remember about me",
+        "do you know me",
+        "do you remember",
+        "about me",
+        "about this user",
+        "about the user",
+        "based on ur memory",
+        "based on your memory",
+        "from your memory",
+        "from memory",
+        "remember about",
+        "know about me",
+        "my info",
+        "my profile",
+    ];
+    personal_keywords.iter().any(|k| lower.contains(k))
 }
 
 fn include_memory_entry_in_answer(entry: &MemoryEntry, question: &str) -> bool {

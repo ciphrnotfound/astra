@@ -42,3 +42,33 @@ pub fn save_global_config(config: &AstraConfig) -> Result<()> {
     fs::write(path, contents)?;
     Ok(())
 }
+
+/// Computes a unique project identifier based on the absolute path.
+pub fn get_global_project_id(project_root: &std::path::Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let abs_path = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    let path_str = abs_path.to_string_lossy().to_string();
+
+    let name = abs_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown_project");
+    
+    let mut hasher = DefaultHasher::new();
+    path_str.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+
+    // Format: name_hash (e.g., cli_codex_a1b2c3d4)
+    format!("{}_{}", name, hash.chars().take(8).collect::<String>())
+}
+
+/// Returns the global brain directory for the current project.
+/// `~/.astra/brain/<project_id>/`
+pub fn get_global_brain_path(project_root: &std::path::Path) -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+        
+    let project_id = get_global_project_id(project_root);
+    home.join(".astra").join("brain").join(project_id)
+}

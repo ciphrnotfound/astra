@@ -32,6 +32,20 @@ pub struct OllamaModel {
     endpoint: String,
 }
 
+pub struct GeminiModel {
+    client: Client,
+    api_key: String,
+    model: String,
+    endpoint: String,
+}
+
+pub struct OpenRouterModel {
+    client: Client,
+    api_key: String,
+    model: String,
+    endpoint: String,
+}
+
 pub struct TavilySearch {
     client: Client,
     api_key: String,
@@ -192,6 +206,39 @@ impl OllamaModel {
     }
 }
 
+impl GeminiModel {
+    pub fn from_env(model: Option<String>) -> Result<Self> {
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .map_err(|_| anyhow!("GEMINI_API_KEY environment variable is not set"))?;
+        let client = Client::new();
+        let model = model.unwrap_or_else(|| "gemini-2.5-flash".to_string());
+        let endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key);
+        Ok(Self {
+            client,
+            api_key,
+            model,
+            endpoint,
+        })
+    }
+}
+
+impl OpenRouterModel {
+    pub fn from_env(model: Option<String>) -> Result<Self> {
+        let api_key = std::env::var("OPENROUTER_API_KEY")
+            .map_err(|_| anyhow!("OPENROUTER_API_KEY environment variable is not set"))?;
+        let client = Client::new();
+        // Default to a stable Free Router (2026 choice)
+        let model = model.unwrap_or_else(|| "google/gemini-2.0-flash-001:free".to_string());
+        let endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
+        Ok(Self {
+            client,
+            api_key,
+            model,
+            endpoint,
+        })
+    }
+}
+
 #[derive(Serialize)]
 struct GroqChatRequest {
     model: String,
@@ -220,6 +267,39 @@ struct GroqMessageResponse {
 }
 
 #[derive(Serialize)]
+struct OpenRouterRequest {
+    model: String,
+    messages: Vec<OpenRouterMessage>,
+}
+
+#[derive(Serialize)]
+struct OpenRouterMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterResponse {
+    choices: Option<Vec<OpenRouterChoice>>,
+    error: Option<OpenRouterError>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterChoice {
+    message: OpenRouterResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterResponseMessage {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterError {
+    message: String,
+}
+
+#[derive(Serialize)]
 struct OllamaGenerateRequest {
     model: String,
     prompt: String,
@@ -229,6 +309,40 @@ struct OllamaGenerateRequest {
 #[derive(Deserialize)]
 struct OllamaGenerateResponse {
     response: String,
+}
+
+#[derive(Serialize)]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
+    #[serde(rename = "safetySettings")]
+    safety_settings: Vec<GeminiSafetySetting>,
+}
+
+#[derive(Serialize)]
+struct GeminiSafetySetting {
+    category: String,
+    threshold: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeminiContent {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct GeminiResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+}
+
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
 }
 
 impl CodexModel for GroqModel {
@@ -312,5 +426,150 @@ impl CodexModel for OllamaModel {
 
         let parsed: OllamaGenerateResponse = response.json()?;
         Ok(parsed.response)
+    }
+}
+
+impl CodexModel for GeminiModel {
+    fn complete(&self, prompt: &str) -> Result<String> {
+        let body = GeminiRequest {
+            contents: vec![GeminiContent {
+                role: "user".to_string(),
+                parts: vec![GeminiPart {
+                    text: prompt.to_string(),
+                }],
+            }],
+            safety_settings: vec![
+                GeminiSafetySetting {
+                    category: "HARM_CATEGORY_HARASSMENT".to_string(),
+                    threshold: "BLOCK_NONE".to_string(),
+                },
+                GeminiSafetySetting {
+                    category: "HARM_CATEGORY_HATE_SPEECH".to_string(),
+                    threshold: "BLOCK_NONE".to_string(),
+                },
+                GeminiSafetySetting {
+                    category: "HARM_CATEGORY_SEXUALLY_EXPLICIT".to_string(),
+                    threshold: "BLOCK_NONE".to_string(),
+                },
+                GeminiSafetySetting {
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT".to_string(),
+                    threshold: "BLOCK_NONE".to_string(),
+                },
+            ],
+        };
+
+        let mut attempts = 0;
+        let max_attempts = 5;
+
+        loop {
+            let response = self
+                .client
+                .post(&self.endpoint)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()?;
+
+            let status = response.status();
+            
+            if status.is_success() {
+                let parsed: GeminiResponse = response.json()?;
+                if let Some(candidates) = parsed.candidates {
+                    if let Some(first) = candidates.into_iter().next() {
+                        if let Some(part) = first.content.parts.into_iter().next() {
+                            return Ok(part.text);
+                        }
+                    }
+                }
+                return Err(anyhow!("Gemini API returned no content"));
+            }
+
+            let err_text = response.text().unwrap_or_default();
+            
+            // Handle 429 Too Many Requests or RESOURCE_EXHAUSTED
+            let is_rate_limited = status.as_u16() == 429 
+                || err_text.contains("RESOURCE_EXHAUSTED")
+                || err_text.contains("quota exceeded")
+                || err_text.contains("429");
+
+            if is_rate_limited && attempts < max_attempts {
+                attempts += 1;
+                // Default backoff: 30s + exponential
+                let mut delay_secs = 30 + (10 * attempts);
+                
+                // Try parsing specific retryDelay from the error string if present (e.g., "retryDelay": "31s")
+                if let Some(start_idx) = err_text.find("\"retryDelay\": \"") {
+                    let substring = &err_text[start_idx + 15..];
+                    if let Some(end_idx) = substring.find("\"") {
+                         let inner = &substring[..end_idx];
+                         let numeric_part = inner.trim_end_matches('s');
+                         if let Ok(parsed_delay) = numeric_part.parse::<f64>() {
+                            delay_secs = (parsed_delay as u64) + 2;
+                        }
+                    }
+                }
+                
+                eprintln!(
+                    "  ⚠ Rate limited (Gemini 429). Sleeping for {}s (attempt {}/{})",
+                    delay_secs, attempts, max_attempts
+                );
+                thread::sleep(Duration::from_secs(delay_secs));
+                continue;
+            }
+
+            return Err(anyhow!("Gemini API error: {} - {}", status, err_text));
+        }
+    }
+}
+
+impl CodexModel for OpenRouterModel {
+    fn complete(&self, prompt: &str) -> Result<String> {
+        self.complete_chat("You are a helpful coding assistant.", prompt)
+    }
+
+    fn complete_chat(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        let body = OpenRouterRequest {
+            model: self.model.clone(),
+            messages: vec![
+                OpenRouterMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.to_string(),
+                },
+                OpenRouterMessage {
+                    role: "user".to_string(),
+                    content: user_prompt.to_string(),
+                },
+            ],
+        };
+
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", "https://github.com/ciphrnotfound/cli_codex")
+            .header("X-Title", "Astra CLI")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()?;
+
+        let status = response.status();
+        let parsed: OpenRouterResponse = response.json()?;
+
+        if !status.is_success() {
+            let err_msg = parsed
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| format!("Unknown error (HTTP {})", status));
+            return Err(anyhow::anyhow!("OpenRouter API error: {}", err_msg));
+        }
+
+        if let Some(choices) = parsed.choices {
+            if let Some(first) = choices.into_iter().next() {
+                if let Some(content) = first.message.content {
+                    return Ok(content);
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("OpenRouter API returned no content. (This model might be offline or currently returning empty completions)"))
     }
 }

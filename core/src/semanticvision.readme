@@ -1,0 +1,206 @@
+The Semantic Graph Vision
+This is the soul of Astra. Everything else is features. This is the foundation.
+
+What It Actually Is
+Imagine your entire codebase as a living city.
+Functions        →  buildings
+Dependencies     →  roads between buildings
+Data flow        →  traffic on those roads
+Git history      →  the city's historical records
+Team knowledge   →  who built which neighbourhood
+PR descriptions  →  the architect's notes
+Comments         →  signs on the buildings
+Every other tool sees individual files. Astra sees the entire city.
+
+What It Stores
+NODES (things that exist):
+→ Every function, class, type, interface
+→ Every file, module, service
+→ Every developer who touched each node
+→ Every commit that changed each node
+→ Every PR that discussed each node
+→ Every comment and TODO inside each node
+
+EDGES (relationships between things):
+→ This function calls that function
+→ This type depends on that type
+→ This service sends data to that service
+→ This file was always changed alongside that file
+→ This bug was introduced when this node changed
+→ This developer understands this cluster best
+
+What Makes It Alive
+Most code graphs are static snapshots. They show you what exists right now.
+Astra's graph is temporal. It has a fourth dimension — time.
+Static graph:    UserService → calls → AuthService
+Astra's graph:   UserService → calls → AuthService
+                 [but 3 months ago it called OldAuthService]
+                 [the switch happened in PR #47]
+                 [because of a security incident]
+                 [and @sarah made that decision]
+                 [and there are still 2 places using the old path]
+That last line. That's the one that saves you from a production incident.
+
+What It Enables
+Every single Astra feature is just a different query on this graph:
+Time Travel Debug   →  "find the node that changed when this broke"
+Archaeology         →  "show me the full history of this node"
+Security Hunter     →  "find nodes that touch user input and reach the DB"
+Onboarding          →  "show a junior the most important nodes first"
+Watchdog            →  "alert when a critical node changes unexpectedly"
+Cross-repo          →  "find equivalent nodes in another codebase"
+Predictive          →  "which nodes change together most often"
+Health Dashboard    →  "score the overall graph health"
+Migration           →  "map nodes from Python to Go equivalents"
+The graph isn't a feature. It's the engine everything runs on.
+
+How It Grows
+Day 1:    Basic graph — functions, files, dependencies
+Week 1:   Git history added — every node has a timeline
+Month 1:  Team patterns emerge — who owns what
+Month 3:  Predictive patterns — what always breaks together
+Month 6:  The graph knows your codebase better than your team
+Year 1:   Institutional knowledge that survives team turnover
+That last one is the multi-million dollar value proposition for enterprises. When a senior engineer leaves — their knowledge usually leaves with them. With Astra's graph it stays forever.
+
+The One Demo That Sells It
+$ astra why src/payments/processor.rs
+
+▸ This file was born on Jan 14 from a 3-way merge conflict
+▸ It's been touched by 6 developers — only @mike fully understands it
+▸ It has 3 layers of logic added at different times:
+  → Core payment flow (Jan) — @mike
+  → Retry logic (March) — @sarah, after the Stripe outage incident  
+  → Fraud detection hooks (July) — @you, 2 days before your deadline
+▸ The retry logic and fraud hooks have never been tested together
+▸ There's a TODO on line 234 that's been there 8 months
+▸ This file is changed every time /api/checkout changes
+  → suggesting hidden coupling that isn't in the imports
+▸ Prediction: the next change here will introduce a bug
+   confidence: 73%
+Nobody. Has. This.
+Not OpenCode. Not Devin. Not Claude Code. Not GitHub Copilot. Not SonarQube. Not Linear. Nobody.
+That's the semantic graph. That's Astra's soul. 🎯
+The semantic memory system is different from the graph. They work together but they're not the same thing.
+
+The Difference First
+Semantic Graph   →  understands STRUCTURE
+                    "how does this codebase connect"
+
+Semantic Memory  →  understands HISTORY
+                    "what happened, when, and why"
+The graph is a map of your city. The memory is the city's diary.
+
+What The Semantic Memory Actually Is
+Most "memory" in AI tools is just storing your chat history. That's not memory — that's a log file.
+Astra's semantic memory is fundamentally different. It stores meaning not just data.
+Normal memory:    "user asked about auth on March 14"
+Semantic memory:  "the auth system is understood to be fragile
+                   because of 3 incidents, 2 rewrites, and 1 near-miss
+                   that was never documented anywhere"
+That second one came from reading 847 commits, 23 PRs, 156 comments, and 6 months of git history. No human told Astra that. It figured it out.
+
+The Four Layers Of Memory
+Layer 1 — Episodic Memory
+What actually happened, in order, with timestamps:
+March 14  →  auth middleware rewritten after JWT exploit
+March 28  →  retry logic added after Stripe outage
+April 2   →  @sarah left the team
+April 3   →  3 PRs touching auth merged same day (unusual)
+April 15  →  first production incident since rewrite
+This is the raw timeline. Every event that mattered.
+
+Layer 2 — Semantic Memory
+What those events mean extracted and stored as concepts:
+CONCEPT: "auth system is high risk"
+EVIDENCE: 2 rewrites, 1 exploit, 1 incident, 1 near-miss
+CONFIDENCE: 91%
+LAST UPDATED: 6 days ago
+
+CONCEPT: "payments and auth are secretly coupled"
+EVIDENCE: changed together 14 times without explicit imports
+CONFIDENCE: 87%
+LAST UPDATED: 2 weeks ago
+
+CONCEPT: "@mike is the only person who understands processor.rs"
+EVIDENCE: 73% of meaningful commits, only one who catches its bugs
+CONFIDENCE: 95%
+LAST UPDATED: yesterday
+These concepts didn't exist in any file. Astra derived them.
+
+Layer 3 — Procedural Memory
+How YOUR team actually works — not how they say they work:
+YOUR TEAM'S ACTUAL PATTERNS:
+→ Friday commits are 3x more likely to cause Monday incidents
+→ PRs over 400 lines are never properly reviewed
+→ Auth changes always need 2 days of monitoring after deploy
+→ @ciphr works best on greenfield — struggles with legacy debt
+→ Test coverage drops every sprint before a deadline
+Nobody documented these. Astra observed them.
+
+Layer 4 — Prospective Memory
+What Astra is watching for based on everything it knows:
+WATCHING:
+→ processor.rs hasn't been touched in 47 days
+   but checkout.ts changes daily — drift building up
+   
+→ @mike hasn't committed in 3 weeks
+   if he leaves, 4 critical files become orphaned
+
+→ The fraud detection hook has never been tested
+   under the retry logic path — ticking time bomb
+This is memory that lives in the future. Not what happened — what's about to happen.
+
+How It Works Technically
+Every commit        →  memory system reads the diff
+                        extracts concepts
+                        updates confidence scores
+                        connects to existing memories
+                        checks prospective watches
+
+Every question      →  memory system finds relevant concepts
+                        ranks by confidence and recency
+                        provides context to the AI
+                        stores the question as episodic memory
+
+Every incident      →  memory system updates risk scores
+                        strengthens related concepts
+                        adds to procedural patterns
+It's not a database. It's not a vector store. It's a living knowledge system that gets smarter every single day you use it.
+
+The Moment It Becomes Irreplaceable
+Six months in, a new developer joins your team. They ask Astra:
+$ astra "where should I start to understand this codebase"
+
+▸ Based on 6 months of watching this codebase here's what matters:
+
+  Start here:
+  1. /core/auth — highest risk, most history, most impactful
+  2. /services/payments — secretly coupled to everything
+  3. /workers/sync — least documented, most confusing
+
+  Avoid for now:
+  → /legacy/* — active rewrite in progress, don't touch
+  → /experimental/* — abandoned, nobody knows what it does
+
+  People to talk to:
+  → @mike for payments (but he's been away 3 weeks — check in)
+  → @sarah for auth (she left but her PRs explain everything)
+  → @ciphr for anything new — don't ask about the legacy worker
+
+  Things that will surprise you:
+  → The "users" service is actually the auth service (historical naming)
+  → Friday deploys always cause Monday incidents — team knows but ignores
+  → There's a bug in the retry logic nobody has fixed for 4 months
+    open issue #234 — ask @ciphr why it's still open
+That answer took 0.3 seconds. It would take a new developer 3 weeks to learn all of that organically.
+That's the semantic memory system. 🎯
+
+How It Connects To The Graph
+Semantic Graph   →  tells you HOW the codebase is connected
+Semantic Memory  →  tells you WHY it got that way
+
+Together:        →  complete institutional knowledge
+                    that survives team changes forever
+One without the other is incomplete. Together they're unprecedented.
+No tool has both. Astra does. That's the moat. 🚀

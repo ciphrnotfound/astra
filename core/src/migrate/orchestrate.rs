@@ -239,7 +239,7 @@ pub fn run_migration(
 
     for source_path in &source_files {
         // Map source path to output path
-        let mut relative = match source_path.strip_prefix(&config.source_dir) {
+        let relative = match source_path.strip_prefix(&config.source_dir) {
             Ok(r) => {
                 if r.as_os_str().is_empty() {
                     Path::new(source_path.file_name().unwrap())

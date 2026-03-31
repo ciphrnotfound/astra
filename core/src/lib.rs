@@ -26,3 +26,5 @@ pub mod tools;
 pub mod agent;
 pub mod orchestrator;
 pub mod workflow;
+pub mod semantic_graph;
+pub mod semantic_memory;
