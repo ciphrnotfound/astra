@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -219,7 +220,7 @@ impl CodexEngine {
         Ok("Web search not available; using default AI knowledge.".to_string())
     }
 
-pub fn handle_input(&mut self, input: &str) -> Result<String> {
+    pub fn handle_input(&mut self, input: &str) -> Result<String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Ok("Say something about your codebase to get started.".to_string());
@@ -391,6 +392,14 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
                 return self.execute_task(g);
             }
             return self.get_next_task(None);
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(":plan ") {
+            let instruction = rest.trim();
+            if instruction.is_empty() {
+                return Ok("Usage: :plan <instruction>".to_string());
+            }
+            return self.execute_plan(instruction);
         }
 
         if trimmed == ":team status" {
@@ -591,7 +600,19 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             self.memory.add("summary", summary.clone());
             return Ok(summary);
         }
-
+        if trimmed == ":onboard" {
+            if self.index.stats().file_count == 0 {
+                self.build_index()?;
+            }
+            if !self.temporal_graph.enriched {
+                if let Some(git) = &self.git {
+                    self.temporal_graph.enrich_from_git(git);
+                    self.concept_store.detect_patterns(&self.temporal_graph);
+                    self.concept_store.check_watches(&self.temporal_graph);
+                }
+            }
+            return Ok(self.render_onboarding());
+        }
         if trimmed == ":graph" {
             if self.index.stats().file_count == 0 {
                 self.build_index()?;
@@ -1527,6 +1548,31 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             }
         }
         if let Some(model) = &self.model {
+            let lower_question = question.to_ascii_lowercase();
+            let risk_related = lower_question.contains("risk")
+                || lower_question.contains("fragile")
+                || lower_question.contains("hotspot")
+                || lower_question.contains("coupling")
+                || lower_question.contains("bus factor")
+                || lower_question.contains("ownership")
+                || lower_question.contains("who owns")
+                || lower_question.contains("stale")
+                || lower_question.contains("history")
+                || lower_question.contains("incident");
+            if risk_related
+                && self.temporal_graph.enriched
+                && self.concept_store.concepts.is_empty()
+            {
+                if let Ok(_) = self
+                    .concept_store
+                    .derive_concepts(&self.memory, &self.temporal_graph, model.as_ref())
+                {
+                    let global_brain = crate::config::get_global_brain_path(&self.root);
+                    let _ = self
+                        .concept_store
+                        .save(&global_brain.join("concepts.json"));
+                }
+            }
             let stats = self.index.stats();
             let by_lang = self.index.files_by_language();
             let mut matches = self
@@ -1561,8 +1607,84 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
                     .add("qa", format!("Q: {}\nA: {}", question, answer));
                 return Ok(answer);
             }
-            
-            // --- Always prioritize project documentation (README/Vision) in context ---
+
+            if !self.concept_store.concepts.is_empty() {
+                let mut concepts = self.concept_store.concepts.clone();
+                concepts.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for concept in concepts.into_iter().take(5) {
+                    matches.push(MemoryEntry {
+                        kind: "semantic-concept".to_string(),
+                        content: format!(
+                            "{} (category: {:?}, confidence: {:.0}%)",
+                            concept.description,
+                            concept.category,
+                            concept.confidence * 100.0
+                        ),
+                        timestamp: concept.last_updated,
+                        event: None,
+                    });
+                }
+            }
+            if !self.concept_store.patterns.is_empty() {
+                let mut patterns = self.concept_store.patterns.clone();
+                patterns.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for pattern in patterns.into_iter().take(3) {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    matches.push(MemoryEntry {
+                        kind: "procedural-pattern".to_string(),
+                        content: format!(
+                            "{} (confidence: {:.0}%, evidence: {})",
+                            pattern.description,
+                            pattern.confidence * 100.0,
+                            pattern.evidence_count
+                        ),
+                        timestamp: ts,
+                        event: None,
+                    });
+                }
+            }
+            if !self.concept_store.watches.is_empty() {
+                let mut watches = self.concept_store.watches.clone();
+                watches.sort_by(|a, b| {
+                    let pa = match a.priority {
+                        crate::semantic_memory::WatchPriority::Critical => 0,
+                        crate::semantic_memory::WatchPriority::High => 1,
+                        crate::semantic_memory::WatchPriority::Medium => 2,
+                        crate::semantic_memory::WatchPriority::Low => 3,
+                    };
+                    let pb = match b.priority {
+                        crate::semantic_memory::WatchPriority::Critical => 0,
+                        crate::semantic_memory::WatchPriority::High => 1,
+                        crate::semantic_memory::WatchPriority::Medium => 2,
+                        crate::semantic_memory::WatchPriority::Low => 3,
+                    };
+                    pa.cmp(&pb)
+                });
+                for watch in watches.into_iter().take(3) {
+                    matches.push(MemoryEntry {
+                        kind: "prospective-watch".to_string(),
+                        content: format!(
+                            "{} [priority: {:?}]",
+                            watch.description,
+                            watch.priority
+                        ),
+                        timestamp: watch.created_at,
+                        event: None,
+                    });
+                }
+            }
+
             if stats.file_count > 0 {
                 let docs = self.memory.events_of_kind("source-doc");
                 for doc in docs.iter().rev().take(1) {
@@ -1764,6 +1886,9 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
 
         if lower.contains("what do you remember")
             || (lower.contains("remember") && lower.contains("what"))
+            || lower.contains("memory bank")
+            || lower.contains("show your memory")
+            || lower.contains("what have you learned")
         {
             return Some(":memory".to_string());
         }
@@ -1772,6 +1897,9 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             || lower.contains("project summary")
             || lower.contains("project info")
             || lower.contains("project information")
+            || lower.contains("overview of the project")
+            || lower.contains("summarize this codebase")
+            || lower.contains("summarize the project")
         {
             return Some(":summary".to_string());
         }
@@ -1801,12 +1929,39 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
         if (lower.contains("how many") && lower.contains("file"))
             || lower.contains("files by language")
             || lower.contains("files-by-lang")
+            || lower.contains("file breakdown by language")
+            || lower.contains("language breakdown")
         {
             return Some(":files-by-lang".to_string());
         }
 
         if lower.contains("git repo") || lower.contains("git repository") {
             return Some(":summary".to_string());
+        }
+
+        if lower.contains("search the web for")
+            || lower.starts_with("search web for ")
+            || lower.starts_with("web search ")
+            || lower.starts_with("google ")
+        {
+            let patterns = [
+                "search the web for ",
+                "search web for ",
+                "web search ",
+                "google ",
+            ];
+            for pat in &patterns {
+                if let Some(pos) = lower.find(pat) {
+                    let start = pos + pat.len();
+                    if start <= trimmed.len() {
+                        let query = trimmed[start..].trim();
+                        if !query.is_empty() {
+                            return Some(format!(":web {}", query));
+                        }
+                    }
+                    break;
+                }
+            }
         }
 
         if (lower.contains("how many") && lower.contains("commit"))
@@ -1825,18 +1980,86 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             return Some(":git-last-commit".to_string());
         }
 
-        if lower.contains("health check") || lower == "health" {
+        if lower.contains("health check")
+            || lower == "health"
+            || lower.contains("codebase health")
+            || lower.contains("health of the project")
+            || lower.contains("project health")
+        {
             return Some(":health".to_string());
         }
 
-        if lower.contains("graph") || lower.contains("semantic graph") {
+        if lower.contains("graph")
+            || lower.contains("semantic graph")
+            || lower.contains("dependency graph")
+            || lower.contains("architecture graph")
+            || lower.contains("map of the project")
+        {
             return Some(":graph".to_string());
+        }
+
+        if lower.contains("where should i start")
+            || lower.contains("onboard me")
+            || lower.contains("onboarding")
+            || lower.contains("understand this codebase")
+        {
+            return Some(":onboard".to_string());
+        }
+
+        if (lower.contains("risk")
+            || lower.contains("risky")
+            || lower.contains("fragile")
+            || lower.contains("hotspot"))
+            && self.temporal_graph.enriched
+        {
+            return Some(":analyze".to_string());
+        }
+
+        if lower.contains("semantic concepts")
+            || lower.contains("semantic memory")
+            || lower.contains("concepts summary")
+        {
+            return Some(":concepts".to_string());
+        }
+
+        if lower.contains("watches")
+            || lower.contains("prospective alerts")
+            || lower.contains("watch list")
+        {
+            return Some(":watches".to_string());
+        }
+
+        if lower.contains("who owns")
+            || lower.contains("ownership report")
+            || lower.contains("file owners")
+        {
+            return Some(":owners".to_string());
+        }
+
+        if lower.contains("coupling")
+            || lower.contains("hidden dependency")
+            || lower.contains("changes together")
+        {
+            return Some(":coupling".to_string());
+        }
+
+        if lower.starts_with("why ") && lower.contains('.') {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            for t in tokens {
+                if t.contains('.') && (t.contains('/') || t.contains('\\')) {
+                    return Some(format!(":why {}", t));
+                }
+            }
         }
 
         if lower.contains("index codebase")
             || lower.contains("index project")
             || lower.contains("reindex")
             || lower == "index"
+            || lower.contains("scan the codebase")
+            || lower.contains("scan this codebase")
+            || lower.contains("analyze the project")
+            || lower.contains("analyze this project")
         {
             return Some(":index".to_string());
         }
@@ -1875,8 +2098,37 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             return Some(":watch".to_string());
         }
 
-        if lower.contains("predict") && (lower.contains("refactor") || lower.contains("debt") || lower.contains("drift")) {
+        if lower.contains("predict")
+            && (lower.contains("refactor")
+                || lower.contains("debt")
+                || lower.contains("drift")
+                || lower.contains("future problems")
+                || lower.contains("future issues")
+                || lower.contains("upcoming issues"))
+        {
             return Some(":predict".to_string());
+        }
+
+        if (lower.contains("find the commit") || lower.contains("which commit"))
+            && (lower.contains("introduced") || lower.contains("caused") || lower.contains("bug"))
+        {
+            return Some(format!(":bisect {}", trimmed));
+        }
+
+        if lower.contains("time travel debug") || lower.contains("time-travel debug") {
+            return Some(format!(":bisect {}", trimmed));
+        }
+
+        if lower.contains("do multiple things")
+            || lower.contains("do several things")
+            || lower.contains("multi step")
+            || lower.contains("multi-step")
+            || lower.contains("plan these steps")
+            || lower.contains("plan this out")
+            || lower.contains("create a todo")
+            || lower.contains("make a todo")
+        {
+            return Some(format!(":plan {}", trimmed));
         }
 
         if lower.contains("list migrations") || lower.contains("show migrations") {
@@ -1920,6 +2172,177 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
             let _ = writeln!(&mut out, "⏱️ Active session: {}", active.task_id);
         }
         Ok(out)
+    }
+
+    fn render_onboarding(&self) -> String {
+        let mut out = String::new();
+        let stats = self.index.stats();
+        let _ = writeln!(
+            &mut out,
+            "Onboarding guide for project at {:?}",
+            self.root
+        );
+        let _ = writeln!(
+            &mut out,
+            "Files: {}  Lines: {}",
+            stats.file_count,
+            stats.total_lines
+        );
+
+        let mut coupling_score: HashMap<String, f32> = HashMap::new();
+        for pair in &self.temporal_graph.co_changes {
+            *coupling_score.entry(pair.file_a.clone()).or_insert(0.0) += pair.coupling_score;
+            *coupling_score.entry(pair.file_b.clone()).or_insert(0.0) += pair.coupling_score;
+        }
+
+        let mut start_here = Vec::new();
+        for history in self.temporal_graph.file_histories.values() {
+            let base = history.total_changes as f32;
+            let coupling = coupling_score
+                .get(&history.path)
+                .copied()
+                .unwrap_or(0.0);
+            let owner_boost = if history.authors.len() == 1 && history.total_changes >= 5 {
+                15.0
+            } else {
+                0.0
+            };
+            let staleness_penalty = if history.staleness_days > 365 {
+                10.0
+            } else if history.staleness_days > 180 {
+                5.0
+            } else {
+                0.0
+            };
+            let score = base + coupling * 10.0 + owner_boost - staleness_penalty;
+            start_here.push((score, history));
+        }
+        start_here.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let _ = writeln!(&mut out, "\nStart here:");
+        if start_here.is_empty() {
+            let _ = writeln!(
+                &mut out,
+                "- No git history available yet. Begin with core modules and README files."
+            );
+        } else {
+            for (_, history) in start_here.iter().take(3) {
+                let owner = history
+                    .primary_owner
+                    .as_deref()
+                    .unwrap_or("unknown");
+                let _ = writeln!(
+                    &mut out,
+                    "- {} (owner: {}, commits: {}, stale: {} days)",
+                    history.path,
+                    owner,
+                    history.total_changes,
+                    history.staleness_days
+                );
+            }
+        }
+
+        let mut avoid_paths = Vec::new();
+        for path in self.index.files().keys() {
+            let s = path.to_string_lossy().to_lowercase();
+            if s.contains("legacy")
+                || s.contains("experimental")
+                || s.contains("playground")
+                || s.contains("scratch")
+                || s.contains("tmp")
+            {
+                avoid_paths.push(path.clone());
+            }
+        }
+        let _ = writeln!(&mut out, "\nAvoid for now:");
+        if avoid_paths.is_empty() {
+            let _ = writeln!(
+                &mut out,
+                "- No obvious legacy or experimental folders detected."
+            );
+        } else {
+            for path in avoid_paths.iter().take(5) {
+                let _ = writeln!(&mut out, "- {}", path.display());
+            }
+        }
+
+        let mut devs: Vec<_> = self.temporal_graph.developers.values().collect();
+        devs.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+        let _ = writeln!(&mut out, "\nPeople to talk to:");
+        if devs.is_empty() {
+            let _ = writeln!(
+                &mut out,
+                "- No git authors detected. Configure git user and make a few commits."
+            );
+        } else {
+            for dev in devs.iter().take(3) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {} ({} commits)",
+                    dev.name,
+                    dev.commit_count
+                );
+            }
+        }
+
+        let mut surprises = Vec::new();
+        for pattern in &self.concept_store.patterns {
+            surprises.push(format!(
+                "Pattern: {} (confidence: {:.0}%)",
+                pattern.description,
+                pattern.confidence * 100.0
+            ));
+        }
+        for watch in &self.concept_store.watches {
+            surprises.push(format!(
+                "Watch: {} [priority: {:?}]",
+                watch.description,
+                watch.priority
+            ));
+        }
+        if let Some(pair) = self.temporal_graph.co_changes.first() {
+            surprises.push(format!(
+                "Hidden coupling: {} ↔ {} ({} changes, {:.0}% coupling)",
+                pair.file_a,
+                pair.file_b,
+                pair.co_change_count,
+                pair.coupling_score * 100.0
+            ));
+        }
+
+        let _ = writeln!(&mut out, "\nThings that will surprise you:");
+        if surprises.is_empty() {
+            let _ = writeln!(
+                &mut out,
+                "- Run :index to build history and patterns, then ask again."
+            );
+        } else {
+            for s in surprises.iter().take(5) {
+                let _ = writeln!(&mut out, "- {}", s);
+            }
+        }
+
+        if let Some(last_health) = self
+            .memory
+            .latest_event("health")
+            .and_then(|entry| entry.event.as_ref())
+        {
+            if let MemoryEvent::HealthSnapshot { scores } = last_health {
+                let _ = writeln!(&mut out, "\nLatest health snapshot:");
+                let _ = writeln!(
+                    &mut out,
+                    "- Code quality: {}  Tests: {}  Drift: {}  Security: {}  Git: {}  Team: {}",
+                    scores.code_quality,
+                    scores.test_health,
+                    scores.cross_lang_drift,
+                    scores.security_surface,
+                    scores.git_health,
+                    scores.team_velocity
+                );
+            }
+        }
+
+        out
     }
 
     fn parse_natural_migrate_request(&self, input: &str) -> Option<String> {
@@ -2151,6 +2574,81 @@ pub fn handle_input(&mut self, input: &str) -> Result<String> {
         self.memory
             .add("task-execution", format!("TASK: {}\nRESULT: {}", goal, result));
         Ok(result)
+    }
+
+    fn execute_plan(&mut self, instruction: &str) -> Result<String> {
+        let model = match &self.model {
+            Some(m) => m,
+            None => {
+                return Ok("No language model configured. Cannot run :plan.".to_string());
+            }
+        };
+
+        let prompt = format!(
+            "You are Astra's CLI planner. Convert the user's instruction into 2-6 concrete CLI steps.\n\
+            Allowed commands:\n\
+            - :web <query>\n\
+            - :index\n\
+            - :summary\n\
+            - :health\n\
+            - :predict\n\
+            - :onboard\n\
+            - :analyze\n\
+            - :task <goal>\n\
+            Rules:\n\
+            - Always choose commands that make sense given the instruction.\n\
+            - Use :web for any research or web search.\n\
+            - Use :task when the user wants Astra to autonomously work towards a goal.\n\
+            - Do NOT generate :plan or any shell commands.\n\
+            - Format each step on its own line exactly as: STEP|<command>|<short description>\n\
+            - <command> must start with ':' and contain no extra text.\n\
+            User instruction:\n{}",
+            instruction
+        );
+
+        let response = model.complete(&prompt)?;
+        let mut steps: Vec<(String, String)> = Vec::new();
+
+        for line in response.lines() {
+            let line = line.trim();
+            if !line.starts_with("STEP|") {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let command = parts[1].trim().to_string();
+            let description = parts[2].trim().to_string();
+            if command.is_empty() || !command.starts_with(':') {
+                continue;
+            }
+            if command.starts_with(":plan") {
+                continue;
+            }
+            steps.push((command, description));
+        }
+
+        if steps.is_empty() {
+            return Ok("Planner could not extract any executable steps from that instruction.".to_string());
+        }
+
+        let mut out = String::new();
+
+        for (i, (cmd, desc)) in steps.iter().enumerate() {
+            let _ = writeln!(&mut out, "- [ ] Step {}: {}", i + 1, desc);
+            let result = self.handle_input(cmd)?;
+            let snippet: String = if result.len() > 400 {
+                result.chars().take(400).collect()
+            } else {
+                result
+            };
+            let one_line = snippet.replace('\n', " ");
+            let _ = writeln!(&mut out, "      → {}", one_line);
+            let _ = writeln!(&mut out, "- [x] Step {}: {} (done)", i + 1, desc);
+        }
+
+        Ok(out)
     }
 
     pub fn report_task_result(&mut self, task_id: &str, success: bool, details: &str) -> Result<String> {
