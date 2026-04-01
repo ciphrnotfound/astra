@@ -1,6 +1,6 @@
 # Astra AI
 🚀 
-
+ 
 > **The CLI that knows your codebase better than you do**
 
 A revolutionary conversational CLI that understands your entire codebase semantically across multiple programming languages, maintains persistent local memory, and can autonomously plan + execute cross-language refactors. Think of it as having a senior engineer who has read every line of code you've ever written, available 24/7 in your terminal.
