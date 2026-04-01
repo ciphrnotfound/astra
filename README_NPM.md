@@ -40,8 +40,10 @@ astra --env .env
 - **Semantic Indexing**: Astra builds a deep graph of your codebase.
 - **Cross-Language Migration**: Autonomous agents can refactor Rust to TypeScript, Go to Python, etc.
 - **Persistent Memory**: Astra remembers your project goals and architecture.
-- **Global OS Layer**: Astra is no longer localized; its brain lives at `~/.astra/brain/` for cross-project intelligence.
-- **Agentic Semantic Tools**: Astra can now autonomously query its own Temporal Graph (`:owners`, `:coupling`, `:why`) to provide zero-guesswork answers.
+- **Global OS Layer**: Astra's brain lives at `~/.astra/brain/` for cross-project memory.
+- **Agentic Semantic Tools**: Astra can now query its own Temporal Graph (`:owners`, `:coupling`).
+- **Onboarding Guide**: Use `:onboard` or "onboard me" for a personalized tour of a new project.
+- **Risk Analysis**: Astra autonomously detects hotspots and fragile code during indexing.
 - **Team Delegation**: Assign tasks to virtual engineers like `!Sam`.
 
 ---
