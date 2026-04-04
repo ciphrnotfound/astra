@@ -598,6 +598,7 @@ impl CodexEngine {
             }
 
             self.memory.add("summary", summary.clone());
+            self.remember_project_snapshot();
             return Ok(summary);
         }
         if trimmed == ":onboard" {
@@ -1197,13 +1198,20 @@ impl CodexEngine {
                     lang, &result[..result.len().min(2000)]
                 ));
             } else {
-                // Check if this is a personal/identity fact and save to global memory
+                self.auto_extract_facts(fact);
                 let lower_fact = fact.to_ascii_lowercase();
-                if lower_fact.starts_with("my name is ") || lower_fact.starts_with("i am ") {
-                    self.memory.add_global("fact", fact.to_string());
-                } else {
-                    self.memory.add("fact", fact.to_string());
+                if lower_fact.starts_with("project ")
+                    || lower_fact.starts_with("this project ")
+                    || lower_fact.starts_with("our project ")
+                {
+                    self.memory.remember_project_fact("note", fact);
+                } else if lower_fact.starts_with("we prefer ")
+                    || lower_fact.starts_with("our style ")
+                    || lower_fact.starts_with("we use ")
+                {
+                    self.memory.remember_style_fact("preference", fact);
                 }
+                self.memory.add("fact", fact.to_string());
                 return Ok(format!(
                     "\u{1f9e0} **Memory Updated**\n\nI've stored this fact: \"{}\".\nI will remember this during future queries and migrations.",
                     fact
@@ -1231,6 +1239,14 @@ impl CodexEngine {
                 let _ = writeln!(&mut out, "\u{2022} **[{}]** ({}) — {}", m.kind.to_uppercase(), date, m.content);
             }
             return Ok(out);
+        }
+
+        if trimmed == ":profile" {
+            return Ok(self.memory.profile_report());
+        }
+
+        if trimmed == ":project-memory" {
+            return Ok(self.memory.project_report());
         }
 
         // ── :predict — predictive refactoring analysis ──────────────
@@ -1374,6 +1390,12 @@ impl CodexEngine {
         self.index = index;
         // Second pass: resolve cross-file import edges
         self.index.resolve_imports();
+        self.remember_project_snapshot();
+
+        let global_brain = crate::config::get_global_brain_path(&self.root);
+        let index_path = global_brain.join("index.json");
+        let _ = self.index.save(&index_path);
+
         Ok(())
     }
 
@@ -1476,6 +1498,21 @@ impl CodexEngine {
                     id, author, date, summary
                 );
             }
+        }
+        let user_profile = self.memory.profile_report();
+        if user_profile != "No user profile facts stored yet." {
+            if wrote_header {
+                out.push('\n');
+            }
+            let _ = writeln!(&mut out, "{}", user_profile);
+            wrote_header = true;
+        }
+        let project_profile = self.memory.project_report();
+        if project_profile != "No project memory facts stored yet." {
+            if wrote_header {
+                out.push('\n');
+            }
+            let _ = writeln!(&mut out, "{}", project_profile);
         }
         if out.trim().is_empty() {
             None
@@ -1715,17 +1752,15 @@ impl CodexEngine {
                 self.root
             );
 
-            // --- Inject user identity from global memory as hard facts ---
-            if let Some(name) = self.memory.user_name() {
-                let _ = writeln!(&mut prompt, "\n### USER IDENTITY (ABSOLUTE FACTS - NEVER CONTRADICT):");
-                let _ = writeln!(&mut prompt, "- The user's name is: {}", name);
+            let profile_report = self.memory.profile_report();
+            if profile_report != "No user profile facts stored yet." {
+                let _ = writeln!(&mut prompt, "\n### USER PROFILE (GROUND TRUTH):");
+                let _ = writeln!(&mut prompt, "{}", profile_report);
             }
-            // Inject any other global preferences/facts
-            if let Some(lang) = self.memory.user_preference("language") {
-                let _ = writeln!(&mut prompt, "- User's preferred language: {}", lang);
-            }
-            if let Some(reasoning) = self.memory.user_preference("reasoning") {
-                let _ = writeln!(&mut prompt, "- Reasoning depth preference: {}", reasoning);
+            let project_report = self.memory.project_report();
+            if project_report != "No project memory facts stored yet." {
+                let _ = writeln!(&mut prompt, "\n### PROJECT MEMORY:");
+                let _ = writeln!(&mut prompt, "{}", project_report);
             }
             
             // Inject Memory context for "Proactive Triggering"
@@ -1891,6 +1926,20 @@ impl CodexEngine {
             || lower.contains("what have you learned")
         {
             return Some(":memory".to_string());
+        }
+
+        if lower.contains("my profile")
+            || lower.contains("what do you know about me")
+            || lower.contains("remember about me")
+        {
+            return Some(":profile".to_string());
+        }
+
+        if lower.contains("project memory")
+            || lower.contains("what do you know about this project")
+            || lower.contains("remember about this project")
+        {
+            return Some(":project-memory".to_string());
         }
 
         if lower.contains("what do you know")
@@ -2597,11 +2646,20 @@ impl CodexEngine {
             - :task <goal>\n\
             Rules:\n\
             - Always choose commands that make sense given the instruction.\n\
-            - Use :web for any research or web search.\n\
+            - Use :web for any research or web search (phrases like 'search the web', 'web search', 'google').\n\
+            - Use :index if the user talks about scanning or analyzing the codebase.\n\
+            - Use :health if the user wants a health check or overall codebase health.\n\
+            - Use :predict if the user mentions refactoring debt, drift, or future problems.\n\
+            - Use :onboard when the user asks where to start or how to understand the codebase.\n\
+            - Use :analyze when the user asks about risk, hotspots, or semantic memory.\n\
             - Use :task when the user wants Astra to autonomously work towards a goal.\n\
             - Do NOT generate :plan or any shell commands.\n\
             - Format each step on its own line exactly as: STEP|<command>|<short description>\n\
             - <command> must start with ':' and contain no extra text.\n\
+            Example mappings:\n\
+            - 'search the web for latest rust async patterns' -> STEP|:web latest rust async patterns|Research async patterns\n\
+            - 'scan the codebase and run a health check' -> STEP|:index|Index codebase\n\
+              STEP|:health|Run health dashboard\n\
             User instruction:\n{}",
             instruction
         );
@@ -2629,14 +2687,94 @@ impl CodexEngine {
             steps.push((command, description));
         }
 
+        let lower_instruction = instruction.to_ascii_lowercase();
+
+        let has_web_step = steps.iter().any(|(cmd, _)| cmd.starts_with(":web "));
+        if (lower_instruction.contains("search the web for")
+            || lower_instruction.starts_with("search web for ")
+            || lower_instruction.starts_with("web search ")
+            || lower_instruction.starts_with("google "))
+            && !has_web_step
+        {
+            let patterns = [
+                "search the web for ",
+                "search web for ",
+                "web search ",
+                "google ",
+            ];
+            for pat in &patterns {
+                if let Some(pos) = lower_instruction.find(pat) {
+                    let start = pos + pat.len();
+                    if start <= instruction.len() {
+                        let query = instruction[start..].trim();
+                        if !query.is_empty() {
+                            steps.insert(
+                                0,
+                                (format!(":web {}", query), format!("Web search: {}", query)),
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        let has_index_step = steps.iter().any(|(cmd, _)| cmd == ":index");
+        if (lower_instruction.contains("index codebase")
+            || lower_instruction.contains("index project")
+            || lower_instruction.contains("reindex")
+            || lower_instruction.contains("scan the codebase")
+            || lower_instruction.contains("scan this codebase")
+            || lower_instruction.contains("analyze the project")
+            || lower_instruction.contains("analyze this project"))
+            && !has_index_step
+        {
+            steps.push((":index".to_string(), "Index the codebase".to_string()));
+        }
+
+        let has_health_step = steps.iter().any(|(cmd, _)| cmd == ":health");
+        if (lower_instruction.contains("health check")
+            || lower_instruction.contains("codebase health")
+            || lower_instruction.contains("health of the project")
+            || lower_instruction.contains("project health"))
+            && !has_health_step
+        {
+            steps.push((
+                ":health".to_string(),
+                "Run codebase health dashboard".to_string(),
+            ));
+        }
+
+        let has_predict_step = steps.iter().any(|(cmd, _)| cmd == ":predict");
+        if (lower_instruction.contains("predict")
+            && (lower_instruction.contains("refactor")
+                || lower_instruction.contains("debt")
+                || lower_instruction.contains("drift")
+                || lower_instruction.contains("future problems")
+                || lower_instruction.contains("future issues")
+                || lower_instruction.contains("upcoming issues")))
+            && !has_predict_step
+        {
+            steps.push((
+                ":predict".to_string(),
+                "Run predictive refactoring analysis".to_string(),
+            ));
+        }
+
         if steps.is_empty() {
             return Ok("Planner could not extract any executable steps from that instruction.".to_string());
         }
 
         let mut out = String::new();
+        let total = steps.len();
+        let _ = writeln!(&mut out, "Plan overview ({} steps):", total);
+        let _ = writeln!(&mut out, "----------------------------------------");
 
         for (i, (cmd, desc)) in steps.iter().enumerate() {
-            let _ = writeln!(&mut out, "- [ ] Step {}: {}", i + 1, desc);
+            let step_no = i + 1;
+            let _ = writeln!(&mut out, "Step {}/{}:", step_no, total);
+            let _ = writeln!(&mut out, "  Description: {}", desc);
+            let _ = writeln!(&mut out, "  Command    : {}", cmd);
             let result = self.handle_input(cmd)?;
             let snippet: String = if result.len() > 400 {
                 result.chars().take(400).collect()
@@ -2644,8 +2782,10 @@ impl CodexEngine {
                 result
             };
             let one_line = snippet.replace('\n', " ");
-            let _ = writeln!(&mut out, "      → {}", one_line);
-            let _ = writeln!(&mut out, "- [x] Step {}: {} (done)", i + 1, desc);
+            let _ = writeln!(&mut out, "  Result     : {}", one_line);
+            if step_no < total {
+                let _ = writeln!(&mut out, "----------------------------------------");
+            }
         }
 
         Ok(out)
@@ -2745,6 +2885,34 @@ impl CodexEngine {
 
         let mut extracted: Vec<String> = Vec::new();
 
+        if let Some(value) = extract_value_after_any(input, &["my name is ", "i'm called ", "call me "]) {
+            self.memory.remember_user_identity("name", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i live in ", "i'm from ", "i am from "]) {
+            self.memory.remember_user_identity("location", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i work at "]) {
+            self.memory.remember_user_identity("company", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i work as "]) {
+            self.memory.remember_user_identity("role", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i speak "]) {
+            self.memory.remember_user_preference("language", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i prefer "]) {
+            self.memory.remember_user_preference("general", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i use "]) {
+            self.memory.remember_user_preference("tooling", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["i like ", "i love "]) {
+            self.memory.remember_user_preference("likes", &value);
+        }
+        if let Some(value) = extract_value_after_any(input, &["my favorite ", "my favourite "]) {
+            self.memory.remember_user_preference("favorite", &value);
+        }
+
         for pattern in &identity_patterns {
             if let Some(pos) = lower.find(pattern) {
                 // Extract a reasonable chunk: from pattern start to end of sentence or 80 chars
@@ -2771,6 +2939,37 @@ impl CodexEngine {
         // Store all extracted facts globally
         for fact in extracted {
             self.memory.add_global("fact", fact);
+        }
+    }
+
+    fn remember_project_snapshot(&mut self) {
+        let stats = self.index.stats();
+        if stats.file_count == 0 {
+            return;
+        }
+        self.memory
+            .remember_project_fact("root", &self.root.to_string_lossy());
+        self.memory
+            .remember_project_fact("file_count", &stats.file_count.to_string());
+        self.memory
+            .remember_project_fact("total_lines", &stats.total_lines.to_string());
+        self.memory
+            .remember_project_fact("symbol_count", &self.index.total_symbol_count().to_string());
+        self.memory.remember_project_fact(
+            "git_enabled",
+            if self.git.is_some() { "yes" } else { "no" },
+        );
+        let mut top = self.index.files_by_language().into_iter().collect::<Vec<_>>();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_languages = top
+            .into_iter()
+            .take(5)
+            .map(|(lang, count)| format!("{}={}", lang, count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !top_languages.is_empty() {
+            self.memory
+                .remember_project_fact("top_languages", &top_languages);
         }
     }
 }
@@ -2896,6 +3095,37 @@ fn is_personal_question(question: &str) -> bool {
     personal_keywords.iter().any(|k| lower.contains(k))
 }
 
+fn extract_value_after_any(input: &str, prefixes: &[&str]) -> Option<String> {
+    let lower = input.to_ascii_lowercase();
+    for prefix in prefixes {
+        if let Some(pos) = lower.find(prefix) {
+            let start = pos + prefix.len();
+            if start <= input.len() {
+                let rest = input[start..].trim();
+                let value = trim_fact_value(rest);
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn trim_fact_value(value: &str) -> String {
+    let mut end = value.len();
+    for separator in [".", ",", ";", " and ", " but "] {
+        if let Some(idx) = value.find(separator) {
+            end = end.min(idx);
+        }
+    }
+    value[..end]
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
 fn include_memory_entry_in_answer(entry: &MemoryEntry, question: &str) -> bool {
     let kind = entry.kind.as_str();
     if matches!(
@@ -3009,4 +3239,4 @@ mod tests {
             "what's on the agenda"
         ));
     }
-}
+ }

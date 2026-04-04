@@ -152,8 +152,10 @@ impl MemoryStore {
 
     /// Get the user's stored name from global memory, if any.
     pub fn user_name(&self) -> Option<String> {
+        if let Some(name) = self.user_identity("name") {
+            return Some(name);
+        }
         if let Some(global) = &self.global {
-            // Check "user-identity" facts first (from onboarding)
             if let Some(entry) = global.entries.iter().rev().find(|e| e.kind == "user-identity") {
                 if let Some(name) = entry.content.strip_prefix("name: ") {
                     return Some(name.to_string());
@@ -192,18 +194,124 @@ impl MemoryStore {
         None
     }
 
-    /// Get a user preference from global memory by key.
-    pub fn user_preference(&self, key: &str) -> Option<String> {
+    pub fn user_identity(&self, key: &str) -> Option<String> {
+        let normalized = key.trim().to_ascii_lowercase();
         if let Some(global) = &self.global {
             for entry in global.entries.iter().rev() {
-                if entry.kind == "user-preference" {
-                    if let Some(val) = entry.content.strip_prefix(&format!("{}: ", key)) {
-                        return Some(val.to_string());
+                if entry.kind == "user-identity" {
+                    if let Some((entry_key, value)) = parse_key_value(&entry.content) {
+                        if entry_key == normalized {
+                            return Some(value);
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.entries.iter().rev() {
+            if entry.kind == "user-identity" {
+                if let Some((entry_key, value)) = parse_key_value(&entry.content) {
+                    if entry_key == normalized {
+                        return Some(value);
                     }
                 }
             }
         }
         None
+    }
+
+    pub fn user_preference(&self, key: &str) -> Option<String> {
+        let normalized = key.trim().to_ascii_lowercase();
+        if let Some(global) = &self.global {
+            for entry in global.entries.iter().rev() {
+                if entry.kind == "user-preference" {
+                    if let Some((entry_key, value)) = parse_key_value(&entry.content) {
+                        if entry_key == normalized {
+                            return Some(value);
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.entries.iter().rev() {
+            if entry.kind == "user-preference" {
+                if let Some((entry_key, value)) = parse_key_value(&entry.content) {
+                    if entry_key == normalized {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn remember_user_identity(&mut self, key: &str, value: &str) {
+        self.upsert_global_keyed("user-identity", key, value);
+    }
+
+    pub fn remember_user_preference(&mut self, key: &str, value: &str) {
+        self.upsert_global_keyed("user-preference", key, value);
+    }
+
+    pub fn remember_project_fact(&mut self, key: &str, value: &str) {
+        self.upsert_local_keyed("project-fact", key, value);
+    }
+
+    pub fn remember_style_fact(&mut self, key: &str, value: &str) {
+        self.upsert_local_keyed("style-memory", key, value);
+    }
+
+    pub fn user_facts(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(global) = &self.global {
+            collect_keyed_entries(&global.entries, "user-identity", &mut out);
+            collect_keyed_entries(&global.entries, "user-preference", &mut out);
+        }
+        collect_keyed_entries(&self.entries, "user-identity", &mut out);
+        collect_keyed_entries(&self.entries, "user-preference", &mut out);
+        dedupe_keyed_pairs(out)
+    }
+
+    pub fn project_facts(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        collect_keyed_entries(&self.entries, "project-fact", &mut out);
+        dedupe_keyed_pairs(out)
+    }
+
+    pub fn style_facts(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        collect_keyed_entries(&self.entries, "style-memory", &mut out);
+        dedupe_keyed_pairs(out)
+    }
+
+    pub fn profile_report(&self) -> String {
+        let facts = self.user_facts();
+        if facts.is_empty() {
+            return "No user profile facts stored yet.".to_string();
+        }
+        let mut out = String::from("User profile memory:\n");
+        for (key, value) in facts {
+            out.push_str(&format!("- {}: {}\n", key, value));
+        }
+        out.trim_end().to_string()
+    }
+
+    pub fn project_report(&self) -> String {
+        let facts = self.project_facts();
+        let styles = self.style_facts();
+        if facts.is_empty() && styles.is_empty() {
+            return "No project memory facts stored yet.".to_string();
+        }
+        let mut out = String::from("Project memory:\n");
+        for (key, value) in facts {
+            out.push_str(&format!("- {}: {}\n", key, value));
+        }
+        if !styles.is_empty() {
+            out.push_str("Style memory:\n");
+            for (key, value) in styles {
+                out.push_str(&format!("- {}: {}\n", key, value));
+            }
+        }
+        out.trim_end().to_string()
     }
 
     pub fn add(&mut self, kind: &str, mut content: String) {
@@ -294,8 +402,12 @@ impl MemoryStore {
                     score += 1;
                 }
             }
-            // Boost user-identity and user-preference entries
-            if entry.kind == "user-identity" || entry.kind == "user-preference" || entry.kind == "fact" {
+            if entry.kind == "user-identity"
+                || entry.kind == "user-preference"
+                || entry.kind == "project-fact"
+                || entry.kind == "style-memory"
+                || entry.kind == "fact"
+            {
                 score += 1;
             }
             (score, (*entry).clone())
@@ -358,4 +470,76 @@ impl MemoryStore {
         }
         Ok(())
     }
+
+    fn upsert_global_keyed(&mut self, kind: &str, key: &str, value: &str) {
+        if let Some(global) = self.global.as_mut() {
+            global.upsert_local_keyed(kind, key, value);
+        } else {
+            self.upsert_local_keyed(kind, key, value);
+        }
+    }
+
+    fn upsert_local_keyed(&mut self, kind: &str, key: &str, value: &str) {
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            return;
+        }
+        let content = format!("{}: {}", key, value);
+        let mut updated = false;
+        if let Some(existing) = self.entries.iter_mut().rev().find(|entry| {
+            entry.kind == kind
+                && parse_key_value(&entry.content)
+                    .map(|(existing_key, _)| existing_key == key)
+                    .unwrap_or(false)
+        }) {
+            if existing.content != content {
+                existing.content = content;
+                existing.timestamp = now_secs();
+                updated = true;
+            }
+        } else {
+            self.push_entry(MemoryEntry {
+                kind: kind.to_string(),
+                content,
+                timestamp: now_secs(),
+                event: None,
+            });
+            return;
+        }
+        if updated {
+            let _ = self.save();
+        }
+    }
+}
+
+fn parse_key_value(content: &str) -> Option<(String, String)> {
+    let (key, value) = content.split_once(':')?;
+    let key = key.trim().to_ascii_lowercase();
+    let value = value.trim().to_string();
+    if key.is_empty() || value.is_empty() {
+        None
+    } else {
+        Some((key, value))
+    }
+}
+
+fn collect_keyed_entries(entries: &[MemoryEntry], kind: &str, out: &mut Vec<(String, String)>) {
+    for entry in entries.iter().rev() {
+        if entry.kind == kind {
+            if let Some((key, value)) = parse_key_value(&entry.content) {
+                out.push((key, value));
+            }
+        }
+    }
+}
+
+fn dedupe_keyed_pairs(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for (key, value) in pairs {
+        seen.entry(key).or_insert(value);
+    }
+    let mut out: Vec<(String, String)> = seen.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
