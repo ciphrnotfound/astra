@@ -63,16 +63,22 @@ export default function DocsPage() {
               Installation
             </h2>
             <p className="text-gray-600 mb-4">
-              Install Astra globally using npm:
+              Install Astra using the installation script (recommended):
             </p>
             <div className="bg-gray-900 text-white p-6 mb-6 font-mono text-sm">
-              <code>npm install -g @astra/cli</code>
+              <code>curl -fsSL https://astra.sh/install | sh</code>
             </div>
             <p className="text-gray-600 mb-4">
-              Or use npx to run without installing:
+              Or install with Cargo if you have Rust installed:
             </p>
             <div className="bg-gray-900 text-white p-6 mb-6 font-mono text-sm">
-              <code>npx @astra/cli migrate --from typescript --to rust</code>
+              <code>cargo install astra-cli</code>
+            </div>
+            <p className="text-gray-600 mb-4">
+              Verify your installation:
+            </p>
+            <div className="bg-gray-900 text-white p-6 mb-6 font-mono text-sm">
+              <code>astra --version</code>
             </div>
           </div>
 
@@ -111,20 +117,44 @@ export default function DocsPage() {
             </h2>
             <div className="space-y-3">
               <div className="border border-gray-200 p-4">
-                <code className="text-sm font-mono text-gray-900">astra migrate</code>
-                <p className="text-sm text-gray-600 mt-2">Migrate code between languages</p>
+                <code className="text-sm font-mono text-gray-900">astra migrate --from &lt;lang&gt; --to &lt;lang&gt; &lt;dir&gt;</code>
+                <p className="text-sm text-gray-600 mt-2">Migrate entire codebase between languages with semantic understanding</p>
               </div>
               <div className="border border-gray-200 p-4">
-                <code className="text-sm font-mono text-gray-900">astra analyze</code>
-                <p className="text-sm text-gray-600 mt-2">Analyze codebase health and dependencies</p>
+                <code className="text-sm font-mono text-gray-900">astra :index</code>
+                <p className="text-sm text-gray-600 mt-2">Index your codebase and build semantic graph</p>
               </div>
               <div className="border border-gray-200 p-4">
-                <code className="text-sm font-mono text-gray-900">astra sync</code>
-                <p className="text-sm text-gray-600 mt-2">Sync data to dashboard</p>
+                <code className="text-sm font-mono text-gray-900">astra :health</code>
+                <p className="text-sm text-gray-600 mt-2">Check codebase health metrics (code quality, security, test coverage)</p>
               </div>
               <div className="border border-gray-200 p-4">
-                <code className="text-sm font-mono text-gray-900">astra health</code>
-                <p className="text-sm text-gray-600 mt-2">Check codebase health metrics</p>
+                <code className="text-sm font-mono text-gray-900">astra :bisect "bug description"</code>
+                <p className="text-sm text-gray-600 mt-2">Time travel debugging - find the commit that introduced a bug</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra :security-scan</code>
+                <p className="text-sm text-gray-600 mt-2">Scan for security vulnerabilities, secrets, and unsafe patterns</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra :graph</code>
+                <p className="text-sm text-gray-600 mt-2">Generate dependency graph visualization</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra team sync --cloud</code>
+                <p className="text-sm text-gray-600 mt-2">Sync team tasks and productivity metrics to cloud</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra --watch</code>
+                <p className="text-sm text-gray-600 mt-2">Monitor file changes in real-time</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra --mcp</code>
+                <p className="text-sm text-gray-600 mt-2">Start Model Context Protocol server for Cursor/Claude integration</p>
+              </div>
+              <div className="border border-gray-200 p-4">
+                <code className="text-sm font-mono text-gray-900">astra --agent</code>
+                <p className="text-sm text-gray-600 mt-2">Enable agentic mode - AI can autonomously read/write files</p>
               </div>
             </div>
           </div>

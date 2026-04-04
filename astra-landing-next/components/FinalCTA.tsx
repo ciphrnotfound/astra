@@ -23,13 +23,13 @@ const FinalCTA = () => {
            </p>
 
            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <button className="relative group overflow-hidden bg-white text-gray-900 px-8 py-4 text-sm font-medium transition-all hover:shadow-xl">
+              <a href="/signup" className="relative group overflow-hidden bg-white text-gray-900 px-8 py-4 text-sm font-medium transition-all hover:shadow-xl">
                  <span className="relative z-10">Get started for free</span>
                  <div className="absolute inset-0 bg-gray-100 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300 ease-out origin-left" />
-              </button>
-              <button className="text-white text-sm font-medium hover:text-gray-300 transition-colors">
+              </a>
+              <a href="/contact" className="text-white text-sm font-medium hover:text-gray-300 transition-colors">
                  Talk to sales →
-              </button>
+              </a>
            </div>
         </motion.div>
       </div>

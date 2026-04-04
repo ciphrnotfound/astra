@@ -7,22 +7,22 @@ const features = [
   {
     icon: Code2,
     title: 'Cross-Language Migration',
-    description: 'Seamlessly migrate code between TypeScript, Rust, Python, Go, and more. Astra understands your code semantically, not just syntactically.',
+    description: 'Migrate entire codebases between TypeScript, Rust, Python, Go, Java, and JavaScript. AI-powered translation with semantic cleanup and auto-fix.',
   },
   {
     icon: Zap,
-    title: 'AI-Powered Refactoring',
-    description: 'Intelligent refactoring that preserves behavior while improving code quality. Let AI handle the tedious work.',
+    title: 'Time Travel Debugging',
+    description: 'Use :bisect to find the exact commit that introduced a bug. Rewind execution history and replay state changes to debug complex issues.',
   },
   {
     icon: Shield,
-    title: 'Type-Safe Transformations',
-    description: 'Every migration is validated for type safety and correctness. No runtime surprises, guaranteed.',
+    title: 'Security Hunter',
+    description: 'Run :security-scan to detect vulnerabilities across your codebase. Proactive security analysis powered by AI pattern recognition.',
   },
   {
     icon: GitBranch,
-    title: 'Time Travel Debugging',
-    description: 'Step through your code execution history. Debug complex issues by rewinding and replaying state changes.',
+    title: 'Team OS',
+    description: 'Built-in task tracking, time logging, and productivity reports. Implicit session tracking syncs to Supabase for team visibility.',
   },
 ];
 

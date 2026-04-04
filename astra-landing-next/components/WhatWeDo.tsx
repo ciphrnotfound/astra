@@ -6,18 +6,18 @@ import { Code2, Zap, Shield } from 'lucide-react';
 const capabilities = [
   {
     icon: Code2,
-    title: 'Semantic Understanding',
-    description: 'Astra doesn\'t just read syntax—it understands your code\'s meaning, dependencies, and patterns across your entire codebase.',
+    title: 'Semantic Code Graph',
+    description: 'Astra builds a semantic index of your entire codebase. Ask questions, explore dependencies, and understand complex systems instantly.',
   },
   {
     icon: Zap,
-    title: 'Instant Refactoring',
-    description: 'Transform your code in real-time. Rename, restructure, or refactor entire modules while maintaining perfect type safety.',
+    title: 'Watch Mode & Agent Mode',
+    description: 'Real-time file monitoring with --watch. Enable --agent mode for autonomous code changes, file writes, and command execution.',
   },
   {
     icon: Shield,
-    title: 'Type-Safe Migrations',
-    description: 'Migrate between languages with confidence. Every line is validated against both source and target type systems.',
+    title: 'MCP Integration',
+    description: 'Model Context Protocol server for Cursor and Claude. Expose your codebase context to AI editors with --mcp.',
   },
 ];
 
