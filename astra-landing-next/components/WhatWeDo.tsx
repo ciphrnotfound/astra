@@ -23,27 +23,27 @@ const capabilities = [
 
 export default function WhatWeDo() {
   return (
-    <section className="py-32 px-6 bg-white">
+    <section className="py-16 md:py-32 px-4 md:px-6 bg-white">
       <div className="max-w-6xl mx-auto">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ duration: 0.6 }}
-          className="text-center mb-20"
+          className="text-center mb-12 md:mb-20"
         >
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-gray-200 bg-[#faf9f6] text-xs font-medium text-gray-700 mb-6">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-gray-200 bg-[#faf9f6] text-xs font-medium text-gray-700 mb-4 md:mb-6">
             What we do
           </div>
           
-          <h2 className="text-4xl md:text-5xl font-medium text-gray-900 mb-6 leading-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+          <h2 className="text-2xl md:text-4xl lg:text-5xl font-medium text-gray-900 mb-4 md:mb-6 leading-tight px-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
             AI-powered code intelligence
             <br />
             <span className="text-gray-600">that actually works</span>
           </h2>
         </motion.div>
 
-        <div className="grid md:grid-cols-3 gap-8">
+        <div className="grid md:grid-cols-3 gap-4 md:gap-8">
           {capabilities.map((capability, index) => (
             <motion.div
               key={capability.title}
@@ -53,18 +53,18 @@ export default function WhatWeDo() {
               transition={{ duration: 0.6, delay: index * 0.15 }}
               className="group relative"
             >
-              <div className="relative bg-[#faf9f6] border border-gray-200 p-8 h-full transition-all duration-300 hover:border-gray-900">
-                <div className="mb-6">
-                  <div className="w-12 h-12 border border-gray-900 bg-white flex items-center justify-center">
-                    <capability.icon className="w-6 h-6 text-gray-900" />
+              <div className="relative bg-[#faf9f6] border border-gray-200 p-6 md:p-8 h-full transition-all duration-300 hover:border-gray-900">
+                <div className="mb-4 md:mb-6">
+                  <div className="w-10 h-10 md:w-12 md:h-12 border border-gray-900 bg-white flex items-center justify-center">
+                    <capability.icon className="w-5 h-5 md:w-6 md:h-6 text-gray-900" />
                   </div>
                 </div>
                 
-                <h3 className="text-xl font-medium text-gray-900 mb-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+                <h3 className="text-lg md:text-xl font-medium text-gray-900 mb-3 md:mb-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
                   {capability.title}
                 </h3>
                 
-                <p className="text-gray-600 leading-relaxed">
+                <p className="text-sm md:text-base text-gray-600 leading-relaxed">
                   {capability.description}
                 </p>
               </div>

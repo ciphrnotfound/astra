@@ -22,9 +22,9 @@ const stats = [
 
 export default function Stats() {
   return (
-    <section className="py-24 px-6 bg-[#faf9f6]">
+    <section className="py-12 sm:py-16 md:py-24 px-4 sm:px-6 bg-[#faf9f6]">
       <div className="max-w-6xl mx-auto">
-        <div className="grid md:grid-cols-3 gap-12">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 sm:gap-10 md:gap-12">
           {stats.map((stat, index) => (
             <motion.div
               key={stat.label}
@@ -34,13 +34,13 @@ export default function Stats() {
               transition={{ duration: 0.5, delay: index * 0.1 }}
               className="text-center"
             >
-              <div className="text-5xl md:text-6xl font-semibold text-gray-900 mb-3" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
+              <div className="text-4xl sm:text-5xl md:text-6xl font-semibold text-gray-900 mb-2 sm:mb-3" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
                 {stat.value}
               </div>
-              <div className="text-lg font-medium text-gray-900 mb-2">
+              <div className="text-base sm:text-lg font-medium text-gray-900 mb-1 sm:mb-2">
                 {stat.label}
               </div>
-              <p className="text-sm text-gray-600 leading-relaxed">
+              <p className="text-xs sm:text-sm text-gray-600 leading-relaxed px-2">
                 {stat.description}
               </p>
             </motion.div>

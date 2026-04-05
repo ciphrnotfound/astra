@@ -13,28 +13,28 @@ const Testimonials = () => {
   ];
 
   return (
-    <section className="py-32 px-6 bg-[#faf9f6]">
+    <section className="py-16 md:py-32 px-4 md:px-6 bg-[#faf9f6]">
       <div className="max-w-6xl mx-auto">
         <motion.div
           initial={{ opacity: 0 }}
           whileInView={{ opacity: 1 }}
           viewport={{ once: true }}
           transition={{ duration: 0.8 }}
-          className="text-center mb-20"
+          className="text-center mb-12 md:mb-20"
         >
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-gray-200 bg-white text-xs font-medium text-gray-700 mb-6">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-gray-200 bg-white text-xs font-medium text-gray-700 mb-4 md:mb-6">
             Testimonials
           </div>
           
-          <h2 className="text-4xl md:text-5xl font-medium text-gray-900 mb-6 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+          <h2 className="text-2xl md:text-4xl lg:text-5xl font-medium text-gray-900 mb-4 md:mb-6 tracking-tight px-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
             Loved by builders
           </h2>
-          <p className="text-gray-600 text-lg">
+          <p className="text-gray-600 text-base md:text-lg px-4">
             Join 100k+ developers building the future with Astra
           </p>
         </motion.div>
 
-        <div className="columns-1 md:columns-2 lg:columns-3 gap-6 space-y-6">
+        <div className="columns-1 md:columns-2 lg:columns-3 gap-4 md:gap-6 space-y-4 md:space-y-6">
           {reviews.map((review, i) => (
             <motion.div
               key={i}
@@ -44,15 +44,15 @@ const Testimonials = () => {
               transition={{ duration: 0.6, delay: i * 0.1 }}
               className="break-inside-avoid"
             >
-              <div className="p-6 border border-gray-200 bg-white transition-all duration-300 hover:border-gray-900">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-10 h-10 bg-gray-200" />
+              <div className="p-4 md:p-6 border border-gray-200 bg-white transition-all duration-300 hover:border-gray-900">
+                <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-4">
+                  <div className="w-8 h-8 md:w-10 md:h-10 bg-gray-200" />
                   <div>
-                    <div className="text-sm font-medium text-gray-900">{review.name}</div>
-                    <div className="text-xs text-gray-500">{review.handle}</div>
+                    <div className="text-xs md:text-sm font-medium text-gray-900">{review.name}</div>
+                    <div className="text-[10px] md:text-xs text-gray-500">{review.handle}</div>
                   </div>
                 </div>
-                <p className="text-gray-600 leading-relaxed text-sm">
+                <p className="text-gray-600 leading-relaxed text-xs md:text-sm">
                   {review.text}
                 </p>
               </div>

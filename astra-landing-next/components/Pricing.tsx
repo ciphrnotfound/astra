@@ -32,14 +32,14 @@ const Pricing = () => {
   ];
 
   return (
-    <section className="py-32 px-6 bg-[#faf9f6]">
+    <section className="py-16 md:py-32 px-4 md:px-6 bg-[#faf9f6]">
       <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-20">
+        <div className="text-center mb-12 md:mb-20">
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             whileInView={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-gray-200 bg-white text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-8"
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-gray-200 bg-white text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-6 md:mb-8"
           >
             Pricing
           </motion.div>
@@ -49,7 +49,7 @@ const Pricing = () => {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
-            className="text-4xl md:text-6xl font-medium text-gray-900 mb-6 tracking-tight"
+            className="text-2xl md:text-4xl lg:text-6xl font-medium text-gray-900 mb-4 md:mb-6 tracking-tight px-4"
             style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}
           >
             Transparent pricing.
@@ -59,13 +59,13 @@ const Pricing = () => {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6, delay: 0.1 }}
-            className="text-gray-600 text-lg"
+            className="text-gray-600 text-base md:text-lg px-4"
           >
             Choose the plan that fits your growth.
           </motion.p>
         </div>
 
-        <div className="grid md:grid-cols-3 gap-6">
+        <div className="grid md:grid-cols-3 gap-4 md:gap-6">
           {plans.map((plan, i) => (
             <PricingCard key={i} plan={plan} index={i} />
           ))}
@@ -94,7 +94,7 @@ function PricingCard({ plan, index }: { plan: any, index: number }) {
       onMouseMove={handleMouseMove}
       className={`group relative ${plan.featured ? 'md:-mt-4' : ''}`}
     >
-      <div className={`relative p-10 rounded-2xl border transition-all duration-500 hover:shadow-xl hover:-translate-y-1 overflow-hidden flex flex-col h-full ${
+      <div className={`relative p-8 md:p-12 lg:p-16 rounded-2xl text-center overflow-hidden flex flex-col h-full ${
         plan.featured 
           ? 'bg-white border-gray-900 shadow-lg' 
           : 'bg-white border-gray-200'
@@ -115,32 +115,32 @@ function PricingCard({ plan, index }: { plan: any, index: number }) {
         
         <div className="relative flex-1 flex flex-col">
           {plan.featured && (
-            <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded-full">
+            <div className="absolute -top-8 md:-top-10 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-[10px] font-bold uppercase tracking-widest px-3 md:px-4 py-1 md:py-1.5 rounded-full">
               Most Popular
             </div>
           )}
           
-          <div className="text-gray-500 font-bold uppercase tracking-widest text-[10px] mb-6">{plan.name}</div>
+          <div className="text-gray-500 font-bold uppercase tracking-widest text-[10px] mb-4 md:mb-6">{plan.name}</div>
           
-          <div className="flex items-baseline gap-1 mb-4">
-            <span className="text-5xl font-medium text-gray-900 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+          <div className="flex items-baseline gap-1 mb-3 md:mb-4">
+            <span className="text-3xl md:text-5xl font-medium text-gray-900 tracking-tight" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
               {plan.price}
             </span>
-            {plan.unit && <span className="text-gray-500 text-sm">{plan.unit}</span>}
+            {plan.unit && <span className="text-gray-500 text-xs md:text-sm">{plan.unit}</span>}
           </div>
           
-          <p className="text-gray-600 mb-8">{plan.description}</p>
+          <p className="text-sm md:text-base text-gray-600 mb-6 md:mb-8">{plan.description}</p>
           
-          <ul className="space-y-3 mb-10 flex-1">
+          <ul className="space-y-2 md:space-y-3 mb-8 md:mb-10 flex-1">
             {plan.features.map((feature: string, j: number) => (
-              <li key={j} className="flex items-center gap-3 text-sm text-gray-700">
+              <li key={j} className="flex items-center gap-2 md:gap-3 text-xs md:text-sm text-gray-700">
                 <div className={`w-1.5 h-1.5 rounded-full ${plan.featured ? 'bg-gray-900' : 'bg-gray-400'}`} />
                 {feature}
               </li>
             ))}
           </ul>
 
-          <button className={`relative group overflow-hidden w-full py-3 rounded text-sm font-medium transition-all ${
+          <button className={`relative group overflow-hidden w-full py-2.5 md:py-3 rounded text-xs md:text-sm font-medium transition-all ${
             plan.featured 
               ? 'bg-gray-900 text-white hover:shadow-lg' 
               : 'border border-gray-900 text-gray-900 hover:text-white'
