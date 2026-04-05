@@ -9,7 +9,7 @@ import {
 
 export const stripe = process.env.STRIPE_SECRET_KEY 
   ? new Stripe(process.env.STRIPE_SECRET_KEY, {
-      apiVersion: '2025-04-30.basil'
+      apiVersion: '2025-08-27.basil'
     })
   : null as any;
 
@@ -84,7 +84,7 @@ export async function createCustomerPortalSession(team: Team) {
           products: [
             {
               product: product.id,
-              prices: prices.data.map((price) => price.id)
+              prices: prices.data.map((price: Stripe.Price) => price.id)
             }
           ]
         },
@@ -155,7 +155,7 @@ export async function getStripePrices() {
     type: 'recurring'
   });
 
-  return prices.data.map((price) => ({
+  return prices.data.map((price: Stripe.Price) => ({
     id: price.id,
     productId:
       typeof price.product === 'string' ? price.product : price.product.id,
@@ -172,7 +172,7 @@ export async function getStripeProducts() {
     expand: ['data.default_price']
   });
 
-  return products.data.map((product) => ({
+  return products.data.map((product: Stripe.Product) => ({
     id: product.id,
     name: product.name,
     description: product.description,

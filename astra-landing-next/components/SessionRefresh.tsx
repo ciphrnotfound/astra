@@ -18,15 +18,18 @@ export default function SessionRefresh() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT' || event === 'USER_DELETED') {
-        // Redirect to sign-in page when user signs out
-        router.push('/signin');
-      } else if (event === 'TOKEN_REFRESHED') {
+      // Handle session changes - only refresh on token refresh
+      if (event === 'TOKEN_REFRESHED') {
         // Refresh the page to update server-side session
         router.refresh();
       } else if (event === 'SIGNED_IN') {
         // Refresh the page when user signs in
         router.refresh();
+      }
+      
+      // Check if session is null (user signed out)
+      if (!session) {
+        router.push('/signin');
       }
     });
 

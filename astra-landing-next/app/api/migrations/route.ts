@@ -16,7 +16,7 @@ export async function GET(request: Request) {
     let query = db
       .from('migrations')
       .select('*')
-      .eq('user_id', session.id)
+      .eq('user_id', session.user.id)
       .order('created_at', { ascending: false });
 
     if (projectId) {
@@ -56,7 +56,7 @@ export async function POST(request: Request) {
       .from('migrations')
       .insert({
         project_id: projectId,
-        user_id: session.id,
+        user_id: session.user.id,
         source_language: sourceLanguage,
         target_language: targetLanguage,
         total_files: totalFiles || 0,

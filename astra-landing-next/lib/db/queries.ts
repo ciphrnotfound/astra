@@ -2,6 +2,7 @@
 // Reusable query functions for fetching data from Supabase
 
 import { createServerClient } from '../supabase/server';
+import type { TeamDataWithMembers } from './schema';
 import type {
   AstraSession,
   HealthSnapshot,
@@ -30,7 +31,7 @@ import type {
  * Includes session counts, lines added/deleted, and recent sessions
  */
 export async function getDashboardStats(userId: number): Promise<CLIDashboardStats> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   // Get user's projects
   const { data: projects } = await supabase
@@ -112,7 +113,7 @@ export async function getHealthMetrics(
   projectId: number,
   timeRange: '7d' | '30d' | '90d' = '30d'
 ): Promise<HealthMetricsWithTrends | null> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   // Calculate timestamp for time range
   const now = Math.floor(Date.now() / 1000);
@@ -187,7 +188,7 @@ export async function getSecurityIssues(
   projectId: number,
   filters?: SecurityIssueFilters
 ): Promise<SecurityIssue[]> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   let query = supabase
     .from('security_issues')
@@ -217,7 +218,7 @@ export async function updateSecurityIssueStatus(
   issueId: number,
   status: 'open' | 'resolved' | 'ignored'
 ): Promise<void> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   const updates: any = { status };
   if (status === 'resolved') {
@@ -244,7 +245,7 @@ export async function getTimelineEvents(
   filters?: CLITimelineEventFilters,
   pagination?: PaginationParams
 ): Promise<PaginatedResponse<CLITimelineEvent>> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   let query = supabase
     .from('timeline_events')
@@ -300,7 +301,7 @@ export async function getCLITasks(
   projectId: number,
   filters?: CLITaskFilters
 ): Promise<CLITask[]> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   let query = supabase
     .from('tasks')
@@ -330,7 +331,7 @@ export async function updateCLITaskStatus(
   taskId: string,
   status: 'Pending' | 'InProgress' | 'Done'
 ): Promise<void> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   const { error } = await supabase
     .from('tasks')
@@ -348,7 +349,7 @@ export async function updateCLITaskStatus(
  * Fetch dependency graph data for a project
  */
 export async function getDependencyGraph(projectId: number): Promise<Dependency[]> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase
     .from('dependencies')
@@ -371,7 +372,7 @@ export async function getAstraSessions(
   filters?: AstraSessionFilters,
   pagination?: PaginationParams
 ): Promise<PaginatedResponse<AstraSession>> {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   let query = supabase
     .from('astra_sessions')
@@ -431,7 +432,7 @@ export async function getMigrations(
   userId: number,
   pagination?: PaginationParams
 ) {
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   let query = supabase
     .from('migrations')
@@ -461,4 +462,167 @@ export async function getMigrations(
       totalPages,
     },
   };
+}
+
+// ============================================================================
+// Authentication & Team Management Queries
+// ============================================================================
+
+/**
+ * Get the currently authenticated user from session
+ */
+export async function getUser() {
+  const supabase = await createServerClient();
+  
+  const { data: { user: authUser } } = await supabase.auth.getUser();
+  
+  if (!authUser) return null;
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', authUser.email)
+    .is('deleted_at', null)
+    .single();
+
+  return user;
+}
+
+/**
+ * Get the current user's team with all team members
+ */
+export async function getTeamForUser(): Promise<TeamDataWithMembers | null> {
+  const user = await getUser();
+  if (!user) return null;
+
+  const supabase = await createServerClient();
+
+  // Get user's team membership
+  const { data: membership } = await supabase
+    .from('team_members')
+    .select(`
+      team_id,
+      teams (
+        id,
+        name,
+        created_at,
+        updated_at,
+        stripe_customer_id,
+        stripe_subscription_id,
+        stripe_product_id,
+        plan_name,
+        subscription_status,
+        team_members (
+          id,
+          role,
+          joined_at,
+          user_id,
+          team_id,
+          users (
+            id,
+            name,
+            email
+          )
+        )
+      )
+    `)
+    .eq('user_id', user.id)
+    .single();
+
+  if (!membership || !membership.teams) return null;
+
+  const teamData: any = membership.teams;
+  
+  // Transform Supabase response to match TeamDataWithMembers type
+  return {
+    id: teamData.id,
+    name: teamData.name,
+    createdAt: new Date(teamData.created_at),
+    updatedAt: new Date(teamData.updated_at),
+    stripeCustomerId: teamData.stripe_customer_id,
+    stripeSubscriptionId: teamData.stripe_subscription_id,
+    stripeProductId: teamData.stripe_product_id,
+    planName: teamData.plan_name,
+    subscriptionStatus: teamData.subscription_status,
+    teamMembers: (teamData.team_members || []).map((member: any) => ({
+      id: member.id,
+      userId: member.user_id,
+      teamId: member.team_id,
+      role: member.role,
+      joinedAt: new Date(member.joined_at),
+      user: {
+        id: member.users.id,
+        name: member.users.name,
+        email: member.users.email,
+      },
+    })),
+  };
+}
+
+/**
+ * Get user with their team information by userId
+ */
+export async function getUserWithTeam(userId: number) {
+  const supabase = await createServerClient();
+
+  const { data: user } = await supabase
+    .from('users')
+    .select(`
+      *,
+      team_members (
+        team_id
+      )
+    `)
+    .eq('id', userId)
+    .single();
+
+  if (!user) return null;
+
+  return {
+    ...user,
+    teamId: user.team_members?.[0]?.team_id || null,
+  };
+}
+
+/**
+ * Get team by Stripe customer ID
+ */
+export async function getTeamByStripeCustomerId(customerId: string) {
+  const supabase = await createServerClient();
+
+  const { data: team } = await supabase
+    .from('teams')
+    .select('*')
+    .eq('stripe_customer_id', customerId)
+    .single();
+
+  return team;
+}
+
+/**
+ * Update team subscription information
+ */
+export async function updateTeamSubscription(
+  teamId: number,
+  subscriptionData: {
+    stripeSubscriptionId: string | null;
+    stripeProductId: string | null;
+    planName: string | null;
+    subscriptionStatus: string;
+  }
+) {
+  const supabase = await createServerClient();
+
+  const { error } = await supabase
+    .from('teams')
+    .update({
+      stripe_subscription_id: subscriptionData.stripeSubscriptionId,
+      stripe_product_id: subscriptionData.stripeProductId,
+      plan_name: subscriptionData.planName,
+      subscription_status: subscriptionData.subscriptionStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', teamId);
+
+  if (error) throw error;
 }

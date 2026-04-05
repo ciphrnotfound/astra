@@ -14,7 +14,7 @@ export async function GET() {
     const { data: apiKeys, error } = await db
       .from('api_keys')
       .select('id, name, key_prefix, last_used_at, created_at, expires_at, is_active')
-      .eq('user_id', session.id)
+      .eq('user_id', session.user.id)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -65,7 +65,7 @@ export async function POST(request: Request) {
     const { error } = await db
       .from('api_keys')
       .insert({
-        user_id: session.id,
+        user_id: session.user.id,
         name,
         key_hash: keyHash,
         key_prefix: keyPrefix,

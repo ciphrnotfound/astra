@@ -10,7 +10,7 @@ export async function GET() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const userId = session.id;
+    const userId = session.user.id;
 
     // Get total projects
     const { count: totalProjects } = await db

@@ -1,6 +1,13 @@
 import clsx from "clsx";
 
-export default function Button(props: ButtonProps) {
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  loading?: boolean;
+  noDefault?: boolean;
+  size?: "default" | "sm" | "lg";
+  variant?: "default" | "secondary" | "danger" | "primary" | "google" | "outline";
+}
+
+export function Button(props: ButtonProps) {
   const {
     loading,
     noDefault,

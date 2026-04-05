@@ -5,9 +5,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-if (!process.env.POSTGRES_URL) {
-  throw new Error('POSTGRES_URL environment variable is not set');
-}
-
-export const client = postgres(process.env.POSTGRES_URL);
+// Make POSTGRES_URL optional - using Supabase client instead
+const postgresUrl = process.env.POSTGRES_URL || 'postgresql://placeholder';
+export const client = postgres(postgresUrl);
 export const db = drizzle(client, { schema });

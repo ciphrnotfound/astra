@@ -7,6 +7,9 @@ export const metadata: Metadata = {
   description: 'Sign in to your Astra account',
 };
 
+// Disable static generation for this page
+export const dynamic = 'force-dynamic';
+
 export default function SignInPage() {
   return (
     <div className="min-h-screen bg-[#faf9f6] flex items-center justify-center px-6 py-12">

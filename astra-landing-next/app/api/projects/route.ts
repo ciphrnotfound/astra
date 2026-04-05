@@ -13,7 +13,7 @@ export async function GET() {
     const { data: projects, error } = await db
       .from('projects')
       .select('*')
-      .eq('user_id', session.id)
+      .eq('user_id', session.user.id)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
     const { data: project, error } = await db
       .from('projects')
       .insert({
-        user_id: session.id,
+        user_id: session.user.id,
         name,
         description,
         repository_url: repositoryUrl,

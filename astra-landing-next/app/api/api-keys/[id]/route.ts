@@ -4,7 +4,7 @@ import { getSession } from '@/lib/auth/session';
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const session = await getSession();
@@ -13,13 +13,14 @@ export async function DELETE(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const keyId = parseInt(params.id);
+    const { id } = await params;
+    const keyId = parseInt(id);
 
     const { error } = await db
       .from('api_keys')
       .delete()
       .eq('id', keyId)
-      .eq('user_id', session.id);
+      .eq('user_id', session.user.id);
 
     if (error) {
       console.error('Error deleting API key:', error);
