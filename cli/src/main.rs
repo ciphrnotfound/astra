@@ -295,10 +295,22 @@ fn main() -> Result<()> {
         let model = args.ollama_model.clone().or_else(|| std::env::var("OLLAMA_MODEL").ok());
         let ollama = OllamaModel::from_env(model, Some(ollama_url))?;
         engine.set_model(Box::new(ollama));
-    } else if args.use_gemini || std::env::var("GEMINI_API_KEY").is_ok() {
+    } else if args.use_gemini || std::env::var("GEMINI_API_KEY").is_ok() || astra_core::config::load_global_config().gemini_api_key.is_some() {
         let model_name = args.gemini_model.clone().or_else(|| persona.model.clone());
         let gemini = GeminiModel::from_env(model_name)?;
-        engine.set_model(Box::new(gemini));
+        
+        let groq_fallback: Option<Box<dyn astra_core::model::CodexModel + Send + Sync>> = GroqModel::from_env(None).ok().map(|g| Box::new(g) as Box<dyn astra_core::model::CodexModel + Send + Sync>);
+        if groq_fallback.is_some() {
+            println!("  {} Groq fallback ready (activates seamlessly if Gemini errors)", "⚡".bold());
+        }
+
+        let fallback = astra_core::model::FallbackModel::new(
+            Box::new(gemini.clone()),
+            groq_fallback,
+            3, // Skip trying Gemini entirely after 3 total strikes
+        );
+        engine.set_model(Box::new(fallback));
+        engine.set_embedder(Box::new(gemini));
     } else if args.use_openrouter || std::env::var("OPENROUTER_API_KEY").is_ok() {
         let model_name = args.openrouter_model.clone().or_else(|| persona.model.clone());
         let openrouter = OpenRouterModel::from_env(model_name)?;
@@ -315,6 +327,24 @@ fn main() -> Result<()> {
         }
     }
 
+    // Show a quick status if we've already indexed this project
+    let stats = engine.index().stats();
+    if stats.file_count > 0 {
+        println!(
+            "{} project {} ({} files, {} lines indexed).",
+            "astra ▸".blue().bold(),
+            "resumed".green(),
+            stats.file_count,
+            stats.total_lines
+        );
+    } else {
+        println!(
+            "{} New project detected. Run {} to start tracking.",
+            "astra ▸".blue().bold(),
+            "astra --index".bold()
+        );
+    }
+
     // ── Handle Config Subcommand ─────────────────────────────────────
     if let Some(Commands::Config { action }) = args.command.clone() {
         match action {
@@ -325,8 +355,29 @@ fn main() -> Result<()> {
                         cfg.user = Some(value.clone());
                         println!("✅ Set global user to '{}'", value);
                     }
+                    "gemini_api_key" => {
+                        cfg.gemini_api_key = Some(value.clone());
+                        println!("✅ Gemini API Key saved locally.");
+                    }
+                    "groq_api_key" => {
+                        cfg.groq_api_key = Some(value.clone());
+                        println!("✅ Groq API Key saved locally.");
+                    }
+                    "openrouter_api_key" => {
+                        cfg.openrouter_api_key = Some(value.clone());
+                        println!("✅ OpenRouter API Key saved locally.");
+                    }
+                    "tavily_api_key" => {
+                        cfg.tavily_api_key = Some(value.clone());
+                        println!("✅ Tavily API Key saved locally.");
+                    }
+                    "ollama_url" => {
+                        cfg.ollama_url = Some(value.clone());
+                        println!("✅ Configured Ollama URL.");
+                    }
                     _ => {
                         eprintln!("❌ Unknown config key: {}", key);
+                        eprintln!("Supported keys: user, gemini_api_key, groq_api_key, openrouter_api_key, tavily_api_key, ollama_url");
                         std::process::exit(1);
                     }
                 }
@@ -1049,8 +1100,16 @@ fn run_repl(engine: &mut CodexEngine, root: &Path) -> Result<()> {
         println!("\n{}", "🧠 Profile saved! I'll remember you across all projects.".magenta().bold());
         println!("{}\n", "──────────────────────────────────────────────────".dark_grey());
     } else if let Some(name) = engine.memory().user_name() {
-        // Greet returning user by name
-        println!("\n {} Welcome back, {}! 👋\n", "▸".cyan(), name);
+        // Greet returning user by name with time awareness
+        let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
+        let greeting = if hour < 12 {
+            "Good morning"
+        } else if hour < 18 {
+            "Good afternoon"
+        } else {
+            "Good evening"
+        };
+        println!("\n {} {}, {}! 👋\n", "▸".cyan(), greeting, name);
     }
     
     // ── Per-Project Onboarding ───────────────────────────────────────

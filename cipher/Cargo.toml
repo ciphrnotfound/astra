@@ -1,0 +1,3 @@
+[workspace]
+members = ["cipher-protocol", "cipher-server"]
+resolver = "2"

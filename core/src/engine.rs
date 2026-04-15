@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
+use chrono::Timelike;
 
 use crate::agent::{self, AgentConfig};
 use crate::config::load_global_config;
@@ -16,7 +17,7 @@ use crate::migrate;
 use crate::migrate::detect::Language;
 use crate::migrate::orchestrate::MigrationConfig;
 use crate::migration;
-use crate::model::{CodexModel, SearchProvider};
+use crate::model::{CodexModel, SearchProvider, EmbeddingProvider};
 use crate::parser::{parse_rust_file, ParsedSymbolKind};
 use crate::persona::Persona;
 use crate::semantic_graph::TemporalGraph;
@@ -52,6 +53,7 @@ pub struct CodexEngine {
     index: CodeIndex,
     model: Option<Box<dyn CodexModel + Send + Sync>>,
     search: Option<Box<dyn SearchProvider + Send + Sync>>,
+    embedder: Option<Box<dyn EmbeddingProvider + Send + Sync>>,
     memory: MemoryStore,
     git: Option<GitRepo>,
     persona: Persona,
@@ -100,14 +102,17 @@ impl CodexEngine {
             .unwrap_or_else(|_| TemporalGraph::new());
         let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
             .unwrap_or_else(|_| ConceptStore::new());
+        let index = CodeIndex::load(&global_brain.join("index.json"))
+            .unwrap_or_else(|_| CodeIndex::new());
 
         register_global_project(&root);
 
         Self {
             root,
-            index: CodeIndex::new(),
+            index,
             model: None,
             search: None,
+            embedder: None,
             memory,
             git,
             persona,
@@ -131,14 +136,17 @@ impl CodexEngine {
             .unwrap_or_else(|_| TemporalGraph::new());
         let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
             .unwrap_or_else(|_| ConceptStore::new());
+        let index = CodeIndex::load(&global_brain.join("index.json"))
+            .unwrap_or_else(|_| CodeIndex::new());
 
         register_global_project(&root);
 
         Self {
             root,
-            index: CodeIndex::new(),
+            index,
             model: None,
             search: None,
+            embedder: None,
             memory,
             git,
             persona,
@@ -162,14 +170,17 @@ impl CodexEngine {
             .unwrap_or_else(|_| TemporalGraph::new());
         let concept_store = ConceptStore::load(&global_brain.join("concepts.json"))
             .unwrap_or_else(|_| ConceptStore::new());
+        let index = CodeIndex::load(&global_brain.join("index.json"))
+            .unwrap_or_else(|_| CodeIndex::new());
 
         register_global_project(&root);
 
         Self {
             root,
-            index: CodeIndex::new(),
+            index,
             model: Some(model),
             search: None,
+            embedder: None,
             memory,
             git,
             persona,
@@ -200,6 +211,14 @@ impl CodexEngine {
         self.search = Some(search);
     }
 
+    pub fn set_embedder(&mut self, embedder: Box<dyn EmbeddingProvider + Send + Sync>) {
+        self.embedder = Some(embedder);
+    }
+
+    fn get_query_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        self.embedder.as_ref().and_then(|e| e.get_embedding(text).ok())
+    }
+
     pub fn research_language(&mut self, lang: Language) -> Result<String> {
         let query = format!("idiomatic {} 2024 2025 syntax patterns and standard libraries", lang);
         if let Some(search) = &self.search {
@@ -226,6 +245,81 @@ impl CodexEngine {
             return Ok("Say something about your codebase to get started.".to_string());
         }
 
+        // ── Fast-path: instant greetings (skip ALL heavy processing) ──
+        {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower == "hey" || lower == "hi" || lower == "hello"
+                || lower == "hey astra" || lower == "hi astra" || lower == "hello astra"
+                || lower == "astra" || lower == "sup" || lower == "yo"
+            {
+                let hour = chrono::Local::now().hour();
+                let greeting = match hour {
+                    5..=11 => "Good morning",
+                    12..=16 => "Good afternoon",
+                    17..=21 => "Good evening",
+                    _ => "Hey",
+                };
+                let user = crate::config::load_global_config()
+                    .user
+                    .unwrap_or_else(|| "there".to_string());
+                // Check if there's an active task to mention
+                let task_path = self.root.join(".astra").join("active_task.json");
+                if let Ok(task_content) = std::fs::read_to_string(&task_path) {
+                    if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
+                        if let Some(title) = task.get("title").and_then(|t| t.as_str()) {
+                            return Ok(format!("{}, {}! 👋 We're currently working on: **{}**. Ready to continue?", greeting, user, title));
+                        }
+                    }
+                }
+                return Ok(format!("{}, {}! 👋 What are you working on?", greeting, user));
+            }
+
+            // Fast-path: "what are we doing" / "what's the agenda" — check active task instantly
+            if lower.contains("what are we doing") || lower.contains("what were we doing")
+                || lower.contains("on the agenda") || lower.contains("whats on the agenda")
+                || lower.contains("what's on the agenda") || lower.contains("what was i doing")
+                || lower.contains("what were we working on") || lower.contains("what are we working on")
+                || lower.contains("previous task") || lower.contains("current task")
+                || lower.contains("active task") || lower.contains("check the task")
+            {
+                let task_path = self.root.join(".astra").join("active_task.json");
+                if let Ok(task_content) = std::fs::read_to_string(&task_path) {
+                    if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
+                        let title = task.get("title").and_then(|t| t.as_str()).unwrap_or("unknown");
+                        let phase = task.get("phase").and_then(|t| t.as_str()).unwrap_or("unknown");
+                        let desc = task.get("description").and_then(|t| t.as_str()).unwrap_or("");
+                        return Ok(format!(
+                            "📌 **Active Task:** {}\n   Status: {}\n   {}\n\nWant to continue this, or start something new?",
+                            title, phase, desc
+                        ));
+                    }
+                }
+                return Ok("No active task found. Tell me what you'd like to work on!".to_string());
+            }
+
+            // Fast-path: "continue" / intent to start working → auto-trigger agent with active task
+            let continue_keywords = [
+                "continue", "resume", "keep going", "keep working", "let's start", "lets start",
+                "go ahead", "do it", "start working", "get to work", "crack on", "proceed",
+                "pick up where", "sound good", "sounds good", "sure",
+            ];
+            
+            let is_short_affirmative = lower == "go" || lower == "yes" || lower == "yep" || lower == "yeah" || lower == "ok" || lower == "okay";
+            
+            if is_short_affirmative || continue_keywords.iter().any(|&k| lower.contains(k)) || (lower.contains("let") && lower.contains("continue")) {
+                let task_path = self.root.join(".astra").join("active_task.json");
+                if let Ok(task_content) = std::fs::read_to_string(&task_path) {
+                    if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
+                        if let Some(title) = task.get("title").and_then(|t| t.as_str()) {
+                            println!(" ⚙️ Launching agent to continue: {}", title);
+                            return self.execute_task(title);
+                        }
+                    }
+                }
+                return Ok("No active task found. Use `:task <goal>` to create one.".to_string());
+            }
+        }
+
         let mut normalized = trimmed.to_string();
         if normalized.starts_with('›') {
             normalized = normalized.trim_start_matches('›').trim_start().to_string();
@@ -233,6 +327,13 @@ impl CodexEngine {
 
         self.record_git_commit();
         self.record_worktree_snapshot();
+
+        // Auto-sync temporal graph incrementally if we have a git repo and it's already enriched
+        if let Some(git) = &self.git {
+            if self.temporal_graph.enriched {
+                self.temporal_graph.enrich_incremental(git);
+            }
+        }
  
         if let Some(cmd) = self.parse_natural_migrate_request(&normalized) {
             return self.handle_input(&cmd);
@@ -298,7 +399,13 @@ impl CodexEngine {
 
             // Enrich with Temporal Graph (zero API calls)
             if let Some(git) = &self.git {
-                self.temporal_graph.enrich_from_git(git);
+                if self.temporal_graph.enriched {
+                    // Incremental: only process commits since last watermark
+                    self.temporal_graph.enrich_incremental(git);
+                } else {
+                    // First run: full build
+                    self.temporal_graph.enrich_from_git(git);
+                }
                 let dev_count = self.temporal_graph.developers.len();
                 let co_change_count = self.temporal_graph.co_changes.len();
                 message.push_str(&format!(
@@ -325,6 +432,11 @@ impl CodexEngine {
             }
 
             return Ok(message);
+        }
+
+        // ── Cross-Project Intelligence ─────────────────────────────
+        if let Some(query) = trimmed.strip_prefix(":global search ") {
+            return self.search_global_knowledge(query.trim());
         }
 
         // ── Semantic Graph + Memory Commands ─────────────────────────
@@ -402,6 +514,14 @@ impl CodexEngine {
             return self.execute_plan(instruction);
         }
 
+        if let Some(rest) = trimmed.strip_prefix(":edit ") {
+            let instruction = rest.trim();
+            if instruction.is_empty() {
+                return Ok("Usage: :edit <filename> <instructions>".to_string());
+            }
+            return self.handle_edit(instruction);
+        }
+
         if trimmed == ":team status" {
             return self.team_status_summary();
         }
@@ -416,7 +536,8 @@ impl CodexEngine {
 
         if let Some(rest) = trimmed.strip_prefix(":memory ") {
             let query = rest.trim();
-            let matches = self.memory.search(query, 20);
+            let q_vec = self.get_query_embedding(query);
+            let matches = self.memory.search(query, q_vec.as_deref(), 20);
             if matches.is_empty() {
                 return Ok("No memory matches found.".to_string());
             }
@@ -1222,7 +1343,8 @@ impl CodexEngine {
         // ── :memory [query] — list or search stored facts ───────────
         if trimmed == ":memory" || trimmed.starts_with(":memory ") {
             let results = if let Some(query) = trimmed.strip_prefix(":memory ") {
-                self.memory.search(query, 10)
+                let q_vec = self.get_query_embedding(query);
+                self.memory.search(query, q_vec.as_deref(), 10)
             } else {
                 self.memory.recent(10)
             };
@@ -1415,7 +1537,8 @@ impl CodexEngine {
     }
 
     fn memory_answer(&self, question: &str) -> Option<String> {
-        let matches = self.memory.search(question, 6);
+        let q_vec = self.get_query_embedding(question);
+        let matches = self.memory.search(question, q_vec.as_deref(), 6);
         let stats = self.index.stats();
         let by_lang = self.index.files_by_language();
         if matches.is_empty() && stats.file_count == 0 {
@@ -1612,9 +1735,10 @@ impl CodexEngine {
             }
             let stats = self.index.stats();
             let by_lang = self.index.files_by_language();
+            let q_vec = self.get_query_embedding(question);
             let mut matches = self
                 .memory
-                .search(question, 6)
+                .search(question, q_vec.as_deref(), 6)
                 .into_iter()
                 .filter(|entry| include_memory_entry_in_answer(entry, question))
                 .take(3)
@@ -1663,6 +1787,7 @@ impl CodexEngine {
                         ),
                         timestamp: concept.last_updated,
                         event: None,
+                        embedding: None,
                     });
                 }
             }
@@ -1688,6 +1813,7 @@ impl CodexEngine {
                         ),
                         timestamp: ts,
                         event: None,
+                        embedding: None,
                     });
                 }
             }
@@ -1718,6 +1844,7 @@ impl CodexEngine {
                         ),
                         timestamp: watch.created_at,
                         event: None,
+                        embedding: None,
                     });
                 }
             }
@@ -1744,6 +1871,10 @@ impl CodexEngine {
                 }
             }
 
+            // --- Autonomous Tool Interception (Semantic Enrichment) ---
+            let semantic_context = self.try_semantic_enrichment(question);
+            matches.extend(semantic_context);
+
             let mut prompt = String::new();
             let _ = writeln!(&mut prompt, "{}", self.persona.system_prompt());
             let _ = writeln!(
@@ -1751,7 +1882,32 @@ impl CodexEngine {
                 "\nYou are Astra, a local codebase assistant. Project root: {:?}.",
                 self.root
             );
+            
+            let current_time = chrono::Local::now();
+            let _ = writeln!(&mut prompt, "The current local time is: {}", current_time.format("%Y-%m-%d %H:%M:%S").to_string());
 
+            // --- Inject active task so the LLM knows what we're working on ---
+            let task_path = self.root.join(".astra").join("active_task.json");
+            if let Ok(task_content) = std::fs::read_to_string(&task_path) {
+                if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
+                    let title = task.get("title").and_then(|t| t.as_str()).unwrap_or("unknown");
+                    let phase = task.get("phase").and_then(|t| t.as_str()).unwrap_or("unknown");
+                    let _ = writeln!(&mut prompt, "\n### ACTIVE TASK (GROUND TRUTH — DO NOT HALLUCINATE DIFFERENT TASKS):");
+                    let _ = writeln!(&mut prompt, "The user is currently working on: {}", title);
+                    let _ = writeln!(&mut prompt, "Task phase: {}", phase);
+                    let _ = writeln!(&mut prompt, "If the user asks about their current task, agenda, or what they were doing, refer to THIS task. Do NOT invent other tasks.");
+                }
+            }
+            
+            let recent_qa = self.memory.events_of_kind("qa");
+            if !recent_qa.is_empty() {
+                let _ = writeln!(&mut prompt, "\n### RECENT CONVERSATION HISTORY:");
+                let _ = writeln!(&mut prompt, "Use this to recall what was just discussed.");
+                for entry in recent_qa.iter().rev().take(4).rev() { // oldest to newest of the last 4
+                    let _ = writeln!(&mut prompt, "{}", entry.content);
+                }
+            }
+            
             let profile_report = self.memory.profile_report();
             if profile_report != "No user profile facts stored yet." {
                 let _ = writeln!(&mut prompt, "\n### USER PROFILE (GROUND TRUTH):");
@@ -1777,6 +1933,22 @@ impl CodexEngine {
             let _ = writeln!(&mut prompt, "\n### Project Stats:");
             let _ = writeln!(&mut prompt, "- Root: {:?}", self.root);
             let _ = writeln!(&mut prompt, "- Indexed: {} files, {} lines.", stats.file_count, stats.total_lines);
+
+            // --- Inject top-level directory listing so the LLM knows what folders exist ---
+            if let Ok(entries) = std::fs::read_dir(&self.root) {
+                let mut dirs: Vec<String> = Vec::new();
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') || name == "node_modules" || name == "target" { continue; }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        dirs.push(name);
+                    }
+                }
+                dirs.sort();
+                if !dirs.is_empty() {
+                    let _ = writeln!(&mut prompt, "- Top-level directories: {}", dirs.join(", "));
+                }
+            }
             if !by_lang.is_empty() {
                 let mut top = by_lang.into_iter().collect::<Vec<_>>();
                 top.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1798,6 +1970,11 @@ impl CodexEngine {
             }
             let _ = writeln!(&mut prompt, "- Never reference README/framework details unless explicitly confirmed by indexed files or current tool output.");
             let _ = writeln!(&mut prompt, "- Do not infer active tasks unless the user explicitly mentions a task in this conversation turn or a verified active task record is provided.");
+            let _ = writeln!(&mut prompt, "\n### CRITICAL RULES:");
+            let _ = writeln!(&mut prompt, "- You are in CHAT MODE. You CANNOT run shell commands, list directories, read files, or execute code.");
+            let _ = writeln!(&mut prompt, "- NEVER output fake commands like ':run_tool_code', 'ls', 'cat', etc. and pretend they are running. You DO NOT have that ability in chat mode.");
+            let _ = writeln!(&mut prompt, "- If the user wants you to actually DO work (read files, write code, run commands), ask them if you should 'go ahead and start' or suggest they use ':task <goal>' which activates your autonomous agent mode.");
+            let _ = writeln!(&mut prompt, "- NEVER lie about having run a command. If you haven't seen the output, say so honestly.");
 
             // --- Autonomous Tool Calling: inject installed workflows ---
             let wf_manager = WorkflowManager::new(&self.root);
@@ -1819,9 +1996,22 @@ impl CodexEngine {
             let _ = writeln!(&mut prompt, "- Reasoning protocol: infer intent, check grounding, and choose either command execution or conversational response.");
             let _ = writeln!(&mut prompt, "- For coding tasks: provide concise implementation reasoning, verify assumptions against project context, and avoid invented APIs or file paths.");
             let _ = writeln!(&mut prompt, "- If the user explicitly asks to execute an action and arguments are sufficient, output ONLY the command starting with `:`.");
-
+            
+            let _ = writeln!(&mut prompt, "\n### EXAMPLES OF CORRECT BEHAVIOR:");
+            let _ = writeln!(&mut prompt, "User: \"Can you run the build script?\"");
+            let _ = writeln!(&mut prompt, "Astra: :workflow run build_script");
+            let _ = writeln!(&mut prompt, "");
+            let _ = writeln!(&mut prompt, "User: \"Why did the rust tests fail?\"");
+            let _ = writeln!(&mut prompt, "Astra: It looks like there is a syntax error in your tests. You need to add a semicolon on line 42.");
+            let _ = writeln!(&mut prompt, "");
+            let _ = writeln!(&mut prompt, "User: \"Automate setting up a python project.\"");
+            let _ = writeln!(&mut prompt, "Astra: :workflow generate Automate setting up a Python project");
+            let _ = writeln!(&mut prompt, "");
+            let _ = writeln!(&mut prompt, "User: \"Migrate the core folder to rust.\"");
+            let _ = writeln!(&mut prompt, "Astra: :migrate core rs out --ai");
             let _ = writeln!(&mut prompt, "\nUser question/task: {}", question);
 
+            println!(" 💭 Thinking...");
             let answer = model.complete(&prompt)?;
 
             // --- Autonomous Interception: scan lines for command ---
@@ -1840,14 +2030,15 @@ impl CodexEngine {
 
             // If the answer seems uncertain and we have web search, augment it
             let lower_answer = answer.to_ascii_lowercase();
-            let seems_uncertain = lower_answer.contains("i don't have")
-                || lower_answer.contains("i'm not sure")
-                || lower_answer.contains("i cannot")
-                || lower_answer.contains("without more context")
-                || lower_answer.contains("i don't know");
+            // Only trigger web search fallback for very specific "I have no info" patterns
+            // Avoid false positives that cause a slow double-call
+            let seems_uncertain = (lower_answer.contains("i don't have") && lower_answer.contains("information"))
+                || (lower_answer.contains("i'm not sure") && lower_answer.len() < 200)
+                || (lower_answer.contains("i don't know") && lower_answer.len() < 200);
 
             if seems_uncertain {
                 if let Some(search) = &self.search {
+                    println!("\n ◈ Astra ❯ Searching the web to find the answer... ⏳");
                     if let Ok(results) = search.search(question) {
                         self.memory.add("web-search", format!("Auto-search for: {}\n{}", question, &results[..results.len().min(2000)]));
                         let augmented_prompt = format!(
@@ -2394,6 +2585,66 @@ impl CodexEngine {
         out
     }
 
+    fn handle_edit(&mut self, instruction: &str) -> Result<String> {
+        let parts: Vec<&str> = instruction.splitn(2, ' ').collect();
+        if parts.len() != 2 {
+            return Ok("Usage: :edit <filename> <instructions>".to_string());
+        }
+        let target_file = self.root.join(parts[0]);
+        let prompt_instruction = parts[1];
+
+        if !target_file.exists() {
+            return Ok(format!("❌ File not found: {}", target_file.display()));
+        }
+
+        let content = std::fs::read_to_string(&target_file)?;
+
+        if let Some(model) = &self.model {
+            println!(" ⚙️ Preparing to autonomous edit target file...");
+            let mut sys_prompt = String::new();
+            let _ = writeln!(&mut sys_prompt, "You are Astra, an autonomous coding agent.");
+            let _ = writeln!(&mut sys_prompt, "Your task is to completely rewrite the provided file based on the user's instructions.");
+            let _ = writeln!(&mut sys_prompt, "You must output ONLY the final raw code for the file. NO MARKDOWN formatting, NO backticks, NO explanations, NO greetings.");
+            let _ = writeln!(&mut sys_prompt, "The exact output you generate will be written directly to the file.");
+
+            let prompt = format!(
+                "{}\n\nINSTRUCTIONS:\n{}\n\nFILE CONTENT:\n{}",
+                sys_prompt, prompt_instruction, content
+            );
+
+            println!(" ⚙️ Waiting for LLM to rewrite {}...", parts[0]);
+            let mut rewritten = model.complete(&prompt)?;
+
+            // Strip markdown backticks if the model ignores the prompt
+            if rewritten.starts_with("```") {
+                if let Some(end) = rewritten.find('\n') {
+                    rewritten = rewritten[end + 1..].to_string();
+                }
+                if rewritten.ends_with("```") {
+                    rewritten = rewritten[..rewritten.len() - 3].to_string();
+                }
+            }
+
+            std::fs::write(&target_file, &rewritten)?;
+
+            if let Some(git) = &self.git {
+                let git_root = git.root_path();
+                let _ = std::process::Command::new("git")
+                    .current_dir(git_root)
+                    .args(&["add", &target_file.to_string_lossy()])
+                    .output();
+                let _ = std::process::Command::new("git")
+                    .current_dir(git_root)
+                    .args(&["commit", "-m", &format!("(astra): auto-edited {}", parts[0])])
+                    .output();
+            }
+
+            Ok(format!("✅ Successfully rewritten {} automatically.", parts[0]))
+        } else {
+            Ok("No language model configured.".to_string())
+        }
+    }
+
     fn parse_natural_migrate_request(&self, input: &str) -> Option<String> {
         let normalized = input
             .replace("->", " to ")
@@ -2925,7 +3176,8 @@ impl CodexEngine {
                 if fact.len() >= 6 {
                     // Check for duplicates
                     let fact_lower = fact.to_ascii_lowercase();
-                    let existing = self.memory.search(&fact, 3);
+                    let q_vec = self.get_query_embedding(&fact);
+                    let existing = self.memory.search(&fact, q_vec.as_deref(), 3);
                     let already_known = existing.iter().any(|e| {
                         e.kind == "fact" && e.content.to_ascii_lowercase().contains(&fact_lower)
                     });
@@ -2972,7 +3224,263 @@ impl CodexEngine {
                 .remember_project_fact("top_languages", &top_languages);
         }
     }
+
+    // ────────────────────────────────────────────────────────────────
+    //  CONVERSATIONAL TOOL INTERCEPTION
+    // ────────────────────────────────────────────────────────────────
+
+    /// Before the LLM generates a response, check if the question
+    /// matches a semantic tool. If it does, execute the tool first
+    /// and return the results as MemoryEntry context for the LLM.
+    fn try_semantic_enrichment(&self, question: &str) -> Vec<MemoryEntry> {
+        let mut extra = Vec::new();
+        let lower = question.to_ascii_lowercase();
+
+        if !self.temporal_graph.enriched {
+            return extra;
+        }
+
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Ownership questions: "who owns engine.rs?", "owner of config.rs"
+        if lower.contains("who owns")
+            || lower.contains("owner of")
+            || lower.contains("who maintains")
+            || lower.contains("who wrote")
+        {
+            if let Some(path) = self.extract_file_path_from_question(question) {
+                if let Some(history) = self.temporal_graph.file_timeline(&path) {
+                    let authors_str: Vec<String> = history
+                        .authors
+                        .iter()
+                        .take(3)
+                        .map(|a| format!("{} ({} commits, {:.0}%)", a.name, a.commit_count, a.percentage))
+                        .collect();
+                    extra.push(MemoryEntry {
+                        kind: "tool-result".to_string(),
+                        content: format!(
+                            "[Ownership data for {}] Primary owner: {}. Contributors: {}. Total commits: {}. Last touched: {} days ago.",
+                            history.path,
+                            history.primary_owner.as_deref().unwrap_or("unknown"),
+                            authors_str.join(", "),
+                            history.total_changes,
+                            history.staleness_days
+                        ),
+                        timestamp: now_ts,
+                        event: None,
+                        embedding: None,
+                    });
+                }
+            } else {
+                // No specific file mentioned — give a summary
+                let report = self.temporal_graph.ownership_report();
+                if report.len() > 50 {
+                    extra.push(MemoryEntry {
+                        kind: "tool-result".to_string(),
+                        content: format!("[Ownership summary] {}", report.chars().take(1500).collect::<String>()),
+                        timestamp: now_ts,
+                        event: None,
+                        embedding: None,
+                    });
+                }
+            }
+        }
+
+        // Coupling questions: "what files are coupled?", "hidden dependencies"
+        if lower.contains("coupling")
+            || lower.contains("coupled")
+            || lower.contains("change together")
+            || lower.contains("hidden dependenc")
+        {
+            let report = self.temporal_graph.coupling_report();
+            if report.len() > 50 {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!("[Coupling analysis] {}", report.chars().take(1500).collect::<String>()),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
+        // Timeline / history questions: "history of engine.rs", "what happened to config.rs"
+        if lower.contains("timeline")
+            || lower.contains("history of")
+            || lower.contains("what happened to")
+            || lower.contains("story of")
+        {
+            if let Some(path) = self.extract_file_path_from_question(question) {
+                if let Some(report) = self.temporal_graph.why_report(&path) {
+                    extra.push(MemoryEntry {
+                        kind: "tool-result".to_string(),
+                        content: format!("[File timeline] {}", report.chars().take(2000).collect::<String>()),
+                        timestamp: now_ts,
+                        event: None,
+                        embedding: None,
+                    });
+                }
+            }
+        }
+
+        // Staleness / risk questions: "what files are stale?", "bus factor"
+        if lower.contains("stale") || lower.contains("bus factor") || lower.contains("at risk") {
+            let mut stale_files: Vec<_> = self
+                .temporal_graph
+                .file_histories
+                .values()
+                .filter(|h| h.staleness_days > 30)
+                .collect();
+            stale_files.sort_by(|a, b| b.staleness_days.cmp(&a.staleness_days));
+
+            if !stale_files.is_empty() {
+                let summary: Vec<String> = stale_files
+                    .iter()
+                    .take(10)
+                    .map(|h| {
+                        format!(
+                            "{} (stale {} days, owner: {}, {} commits)",
+                            h.path,
+                            h.staleness_days,
+                            h.primary_owner.as_deref().unwrap_or("unknown"),
+                            h.total_changes
+                        )
+                    })
+                    .collect();
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!("[Staleness report] {} stale files (>30 days): {}", stale_files.len(), summary.join("; ")),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
+        extra
+    }
+
+    /// Extract a file path from a natural language question.
+    /// Looks for tokens containing '.' that look like file paths.
+    fn extract_file_path_from_question(&self, question: &str) -> Option<String> {
+        let file_extensions = [
+            ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java",
+            ".toml", ".json", ".yaml", ".yml", ".md", ".css", ".html",
+        ];
+        for token in question.split_whitespace() {
+            let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-');
+            if file_extensions.iter().any(|ext| clean.ends_with(ext)) {
+                return Some(clean.to_string());
+            }
+        }
+        None
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  CROSS-PROJECT INTELLIGENCE
+    // ────────────────────────────────────────────────────────────────
+
+    /// Search memory and concepts across ALL registered projects.
+    fn search_global_knowledge(&self, query: &str) -> Result<String> {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        let registry_path = home.join(".astra").join("registry.json");
+        let registry: serde_json::Value = match fs::read_to_string(&registry_path) {
+            Ok(c) => serde_json::from_str(&c).unwrap_or(serde_json::json!({})),
+            Err(_) => return Ok("No global registry found. Run :index in at least one project first.".to_string()),
+        };
+
+        let obj = match registry.as_object() {
+            Some(o) => o,
+            None => return Ok("Registry is empty.".to_string()),
+        };
+
+        let query_lower = query.to_ascii_lowercase();
+        let mut results: Vec<String> = Vec::new();
+
+        for (project_id, project_path) in obj {
+            let brain_dir = home.join(".astra").join("brain").join(project_id);
+            let project_label = project_path.as_str().unwrap_or(project_id);
+
+            // Search episodic memory
+            let memory_path = brain_dir.join("episodic_memory.json");
+            if memory_path.exists() {
+                if let Ok(data) = fs::read_to_string(&memory_path) {
+                    if let Ok(entries) = serde_json::from_str::<Vec<MemoryEntry>>(&data) {
+                        for entry in entries.iter().rev().take(200) {
+                            if entry.content.to_ascii_lowercase().contains(&query_lower) {
+                                results.push(format!(
+                                    "[{}] ({}) {}",
+                                    project_id,
+                                    entry.kind,
+                                    entry.content.chars().take(200).collect::<String>()
+                                ));
+                                if results.len() >= 15 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Search concepts
+            let concepts_path = brain_dir.join("concepts.json");
+            if concepts_path.exists() {
+                if let Ok(concepts) = crate::semantic_memory::ConceptStore::load(&concepts_path) {
+                    for c in &concepts.concepts {
+                        if c.description.to_ascii_lowercase().contains(&query_lower) {
+                            results.push(format!(
+                                "[{}] Concept: {} (confidence: {:.0}%)",
+                                project_id,
+                                c.description,
+                                c.confidence * 100.0
+                            ));
+                        }
+                    }
+                    for p in &concepts.patterns {
+                        if p.description.to_ascii_lowercase().contains(&query_lower) {
+                            results.push(format!(
+                                "[{}] Pattern: {}",
+                                project_id, p.description
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if results.len() >= 15 {
+                break;
+            }
+        }
+
+        if results.is_empty() {
+            Ok(format!(
+                "No matches for '{}' across {} registered projects.",
+                query,
+                obj.len()
+            ))
+        } else {
+            let mut out = format!(
+                "Cross-project search for '{}' ({} results across {} projects):\n\n",
+                query,
+                results.len(),
+                obj.len()
+            );
+            for r in &results {
+                out.push_str(&format!("  {}\n", r));
+            }
+            Ok(out)
+        }
+    }
 }
+
 
 fn resolve_memory_path(root: &Path) -> PathBuf {
     let global_brain = crate::config::get_global_brain_path(root);

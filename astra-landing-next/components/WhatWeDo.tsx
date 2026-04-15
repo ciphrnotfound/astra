@@ -7,17 +7,17 @@ const capabilities = [
   {
     icon: Code2,
     title: 'Semantic Code Graph',
-    description: 'Astra builds a semantic index of your entire codebase. Ask questions, explore dependencies, and understand complex systems instantly.',
+    description: 'Astra builds a living knowledge graph of your entire codebase. Understand dependencies, trace ownership, and discover hidden coupling instantly.',
   },
   {
     icon: Zap,
-    title: 'Watch Mode & Agent Mode',
-    description: 'Real-time file monitoring with --watch. Enable --agent mode for autonomous code changes, file writes, and command execution.',
+    title: 'Persistent Memory',
+    description: 'Every conversation, decision, and insight is remembered forever. Astra learns your codebase and gets smarter with every commit.',
   },
   {
     icon: Shield,
-    title: 'MCP Integration',
-    description: 'Model Context Protocol server for Cursor and Claude. Expose your codebase context to AI editors with --mcp.',
+    title: 'Agent Mode',
+    description: 'Autonomous code editing with tool use. Astra can read, write, search, and execute commands to complete complex tasks independently.',
   },
 ];
 
@@ -37,9 +37,9 @@ export default function WhatWeDo() {
           </div>
           
           <h2 className="text-2xl md:text-4xl lg:text-5xl font-medium text-gray-900 mb-4 md:mb-6 leading-tight px-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
-            AI-powered code intelligence
+            The codebase operating system
             <br />
-            <span className="text-gray-600">that actually works</span>
+            <span className="text-gray-600">that never forgets</span>
           </h2>
         </motion.div>
 
@@ -53,9 +53,9 @@ export default function WhatWeDo() {
               transition={{ duration: 0.6, delay: index * 0.15 }}
               className="group relative"
             >
-              <div className="relative bg-[#faf9f6] border border-gray-200 p-6 md:p-8 h-full transition-all duration-300 hover:border-gray-900">
+              <div className="relative bg-[#faf9f6] border border-gray-200 p-6 md:p-8 h-full transition-all duration-300 hover:border-gray-900 hover:-translate-y-1 hover:shadow-lg">
                 <div className="mb-4 md:mb-6">
-                  <div className="w-10 h-10 md:w-12 md:h-12 border border-gray-900 bg-white flex items-center justify-center">
+                  <div className="w-10 h-10 md:w-12 md:h-12 border border-gray-900 bg-white flex items-center justify-center transition-transform duration-300 group-hover:scale-110">
                     <capability.icon className="w-5 h-5 md:w-6 md:h-6 text-gray-900" />
                   </div>
                 </div>

@@ -1,102 +1,108 @@
 'use client';
 
-import { useState } from 'react';
-import { Home, FileText, FolderOpen, Settings, LayoutDashboard, PanelLeftClose, PanelLeft, Key } from 'lucide-react';
+import { Home, Activity, GitBranch, Shield, CheckSquare, Database, BookOpen, Settings, Key, LogOut } from 'lucide-react';
 import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
+import type { User } from '@supabase/supabase-js';
+import { createClient } from '@/lib/supabase/client';
 
-export default function DashboardSidebar() {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isPinned, setIsPinned] = useState(false);
+interface DashboardSidebarProps {
+  user: User;
+}
+
+export default function DashboardSidebar({ user }: DashboardSidebarProps) {
+  const pathname = usePathname();
+  const router = useRouter();
 
   const menuItems = [
     { icon: Home, label: 'Overview', href: '/dashboard' },
-    { icon: FileText, label: 'Migrations', href: '/dashboard/migrations' },
-    { icon: FolderOpen, label: 'Projects', href: '/dashboard/projects' },
-    { icon: LayoutDashboard, label: 'Analytics', href: '/dashboard/analytics' },
+    { icon: Activity, label: 'Health', href: '/dashboard/health' },
+    { icon: GitBranch, label: 'Graph', href: '/dashboard/graph' },
+    { icon: Database, label: 'Memory', href: '/dashboard/memory' },
     { icon: Key, label: 'API Keys', href: '/dashboard/api-keys' },
     { icon: Settings, label: 'Settings', href: '/dashboard/settings' },
   ];
 
-  const handleMouseEnter = () => {
-    if (!isPinned) {
-      setIsExpanded(true);
+  const isActive = (href: string) => {
+    if (href === '/dashboard') {
+      return pathname === href;
     }
+    return pathname?.startsWith(href);
   };
 
-  const handleMouseLeave = () => {
-    if (!isPinned) {
-      setIsExpanded(false);
-    }
+  const handleSignOut = async () => {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.push('/');
+    router.refresh();
   };
 
-  const togglePin = () => {
-    setIsPinned(!isPinned);
-    setIsExpanded(!isPinned);
+  const getUserInitials = () => {
+    if (user.user_metadata?.name) {
+      return user.user_metadata.name
+        .split(' ')
+        .map((n: string) => n[0])
+        .join('')
+        .toUpperCase()
+        .slice(0, 2);
+    }
+    return user.email?.charAt(0).toUpperCase() || 'U';
+  };
+
+  const getDisplayName = () => {
+    return user.user_metadata?.name || user.email?.split('@')[0] || 'User';
   };
 
   return (
-    <aside
-      className={`fixed left-0 top-16 h-[calc(100vh-4rem)] bg-[#faf9f6] border-r border-gray-200 transition-all duration-300 ease-in-out z-40 ${
-        isExpanded || isPinned ? 'w-64' : 'w-20'
-      }`}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-    >
-      <div className="flex flex-col h-full py-4">
-        {/* Pin/Unpin Button */}
-        <div className="px-3 mb-6 flex justify-end">
-          <button
-            onClick={togglePin}
-            className="relative group overflow-hidden p-1.5 border border-gray-300 text-gray-600 transition-all hover:text-white"
-            title={isPinned ? 'Unpin sidebar' : 'Pin sidebar'}
-          >
-            {isPinned ? (
-              <PanelLeftClose className="w-4 h-4 relative z-10" />
-            ) : (
-              <PanelLeft className="w-4 h-4 relative z-10" />
-            )}
-            <div className="absolute inset-0 bg-gray-900 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
-          </button>
-        </div>
+    <aside className="fixed left-0 top-0 h-screen w-64 bg-white border-r border-gray-200 flex flex-col z-50">
+      {/* Logo */}
+      <div className="h-16 flex items-center px-6 border-b border-gray-100">
+        <Link href="/" className="flex items-center gap-3">
+          <div className="w-8 h-8 flex items-center justify-center shrink-0">
+            <img src="/astra-logo-2.png" alt="Astra Logo" className="w-full h-full object-contain" />
+          </div>
+          <span className="text-sm font-mono text-gray-900 tracking-wide">ASTRA</span>
+        </Link>
+      </div>
 
-        {/* Menu Items */}
-        <nav className="flex-1 px-3 space-y-1">
+      {/* Navigation */}
+      <nav className="flex-1 px-3 py-4 overflow-y-auto">
+        <div className="space-y-1">
           {menuItems.map((item) => (
             <Link
               key={item.label}
               href={item.href}
-              className="relative group overflow-hidden flex items-center gap-3 px-3 py-2.5 text-gray-600 transition-all hover:text-white"
-            >
-              <item.icon className="w-5 h-5 flex-shrink-0 relative z-10" />
-              <span
-                className={`relative z-10 text-sm font-medium whitespace-nowrap transition-all duration-300 ${
-                  isExpanded || isPinned ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 absolute'
-                }`}
-              >
-                {item.label}
-              </span>
-              <div className="absolute inset-0 bg-gray-900 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
-            </Link>
-          ))}
-        </nav>
-
-        {/* Footer - User Profile */}
-        <div className="px-3 pt-4 border-t border-gray-200">
-          <div className="relative group overflow-hidden flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-all hover:text-white">
-            <div className="w-7 h-7 bg-gray-900 flex items-center justify-center flex-shrink-0 relative z-10">
-              <span className="text-white text-xs font-medium">U</span>
-            </div>
-            <div
-              className={`relative z-10 transition-all duration-300 ${
-                isExpanded || isPinned ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 absolute'
+              className={`flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all ${
+                isActive(item.href)
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
               }`}
             >
-              <div className="text-sm font-medium text-gray-900 whitespace-nowrap group-hover:text-white">User</div>
-              <div className="text-xs text-gray-600 whitespace-nowrap group-hover:text-gray-300">user@example.com</div>
-            </div>
-            <div className="absolute inset-0 bg-gray-900 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
+              <item.icon className="w-4 h-4 shrink-0" />
+              <span>{item.label}</span>
+            </Link>
+          ))}
+        </div>
+      </nav>
+
+      {/* User Section */}
+      <div className="border-t border-gray-100 p-3">
+        <div className="flex items-center gap-3 px-3 py-2 mb-2">
+          <div className="w-8 h-8 bg-gray-900 flex items-center justify-center shrink-0">
+            <span className="text-white text-xs font-medium">{getUserInitials()}</span>
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-900 truncate">{getDisplayName()}</p>
+            <p className="text-xs text-gray-500 truncate">{user.email}</p>
           </div>
         </div>
+        <button
+          onClick={handleSignOut}
+          className="w-full flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-all"
+        >
+          <LogOut className="w-4 h-4" />
+          <span>Sign out</span>
+        </button>
       </div>
     </aside>
   );

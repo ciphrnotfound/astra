@@ -6,23 +6,23 @@ import { Code2, Zap, Shield, GitBranch } from 'lucide-react';
 const features = [
   {
     icon: Code2,
-    title: 'Cross-Language Migration',
-    description: 'Migrate entire codebases between TypeScript, Rust, Python, Go, Java, and JavaScript. AI-powered translation with semantic cleanup and auto-fix.',
+    title: 'Semantic Code Graph',
+    description: 'Builds a living knowledge graph of your entire codebase. Understand dependencies, trace ownership, and discover hidden coupling instantly.',
   },
   {
     icon: Zap,
-    title: 'Time Travel Debugging',
-    description: 'Use :bisect to find the exact commit that introduced a bug. Rewind execution history and replay state changes to debug complex issues.',
+    title: 'Persistent Memory',
+    description: 'Every conversation, decision, and insight is stored locally and remembered forever. Astra learns your codebase and gets smarter with every commit.',
   },
   {
     icon: Shield,
-    title: 'Security Hunter',
-    description: 'Run :security-scan to detect vulnerabilities across your codebase. Proactive security analysis powered by AI pattern recognition.',
+    title: 'Time Travel Debugging',
+    description: 'Use :bisect to find the exact commit that introduced a bug. Step backward through execution history and see every state change.',
   },
   {
     icon: GitBranch,
-    title: 'Team OS',
-    description: 'Built-in task tracking, time logging, and productivity reports. Implicit session tracking syncs to Supabase for team visibility.',
+    title: 'Agent Mode',
+    description: 'Autonomous code editing with tool use. Astra can read, write, search, and execute commands to complete complex tasks independently.',
   },
 ];
 
@@ -37,11 +37,11 @@ export default function Features() {
           transition={{ duration: 0.5 }}
           className="text-center mb-12 sm:mb-16"
         >
-          <h2 className="text-2xl sm:text-3xl md:text-4xl font-semibold text-gray-900 mb-3 sm:mb-4">
-            Built for modern development
+          <h2 className="text-2xl sm:text-3xl md:text-4xl font-semibold font-cabinet text-gray-900 mb-3 sm:mb-4">
+            Your codebase, permanently understood
           </h2>
           <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto px-4">
-            Astra combines AI with deep language understanding to transform how you work with code.
+            Unlike other tools that forget you the moment you close the terminal, Astra never does.
           </p>
         </motion.div>
 
@@ -53,10 +53,10 @@ export default function Features() {
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
               transition={{ duration: 0.5, delay: index * 0.1 }}
-              className="group p-6 sm:p-8 rounded-lg border border-gray-200 hover:border-gray-300 transition-all hover:shadow-lg bg-white"
+              className="group p-6 sm:p-8 rounded-lg border border-gray-200 hover:border-gray-900 transition-all duration-300 hover:shadow-lg hover:-translate-y-1 bg-white"
             >
-              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-lg bg-gray-100 flex items-center justify-center mb-3 sm:mb-4 group-hover:bg-gray-900 transition-colors">
-                <feature.icon className="w-5 h-5 sm:w-6 sm:h-6 text-gray-900 group-hover:text-white transition-colors" />
+              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-lg bg-gray-100 flex items-center justify-center mb-3 sm:mb-4 group-hover:bg-gray-900 transition-all duration-300 group-hover:scale-110">
+                <feature.icon className="w-5 h-5 sm:w-6 sm:h-6 text-gray-900 group-hover:text-white transition-colors duration-300" />
               </div>
               <h3 className="text-lg sm:text-xl font-semibold text-gray-900 mb-2">
                 {feature.title}

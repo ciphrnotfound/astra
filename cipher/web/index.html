@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CIPHER — MVP</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #0a0f1e;
+        color: #f0f4ff;
+        font-family: system-ui, sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 1rem;
+      }
+      h1 {
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        margin: 0 0 0.5rem;
+      }
+      p {
+        margin: 0 0 1rem;
+        opacity: 0.85;
+        font-size: 0.9rem;
+      }
+      #lobby {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-bottom: 1rem;
+      }
+      input {
+        padding: 0.5rem 0.75rem;
+        border: 1px solid #1a2744;
+        background: #0d1526;
+        color: #f0f4ff;
+        border-radius: 0;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        background: #2b8ef0;
+        color: #0a0f1e;
+        border: none;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      #game-wrap {
+        border: 2px solid #1a2744;
+        background: #0d1526;
+      }
+      canvas {
+        display: block;
+        image-rendering: pixelated;
+      }
+      #hud {
+        margin-top: 0.75rem;
+        font-size: 0.85rem;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>CIPHER</h1>
+    <p>Browser MVP — WASD / arrows, space jump. Open two tabs to see multiplayer.</p>
+    <div id="lobby">
+      <input id="name" type="text" placeholder="Name" maxlength="24" value="player" />
+      <button id="connect">Connect</button>
+      <span id="status">Disconnected</span>
+    </div>
+    <div id="game-wrap">
+      <canvas id="c" width="800" height="800"></canvas>
+    </div>
+    <div id="hud">Tick: —</div>
+    <script src="app.js"></script>
+  </body>
+</html>

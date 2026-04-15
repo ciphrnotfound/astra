@@ -19,6 +19,10 @@ pub trait SearchProvider {
     fn search(&self, query: &str) -> Result<String>;
 }
 
+pub trait EmbeddingProvider {
+    fn get_embedding(&self, text: &str) -> Result<Vec<f32>>;
+}
+
 pub struct GroqModel {
     client: Client,
     api_key: String,
@@ -32,6 +36,7 @@ pub struct OllamaModel {
     endpoint: String,
 }
 
+#[derive(Clone)]
 pub struct GeminiModel {
     client: Client,
     api_key: String,
@@ -55,10 +60,16 @@ static GROQ_LAST_REQUEST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 impl TavilySearch {
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("TAVILY_API_KEY")
-            .map_err(|_| anyhow!("TAVILY_API_KEY environment variable is not set"))?;
+        let config = crate::config::load_global_config();
+        let api_key = config.tavily_api_key
+            .or_else(|| std::env::var("TAVILY_API_KEY").ok())
+            .ok_or_else(|| anyhow!("TAVILY_API_KEY is not set in config or environment"))?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Ok(Self {
-            client: Client::new(),
+            client,
             api_key,
         })
     }
@@ -120,9 +131,14 @@ impl SearchProvider for TavilySearch {
 
 impl GroqModel {
     pub fn from_env(model: Option<String>) -> Result<Self> {
-        let api_key = std::env::var("GROQ_API_KEY")
-            .map_err(|_| anyhow!("GROQ_API_KEY environment variable is not set"))?;
-        let client = Client::new();
+        let config = crate::config::load_global_config();
+        let api_key = config.groq_api_key
+            .or_else(|| std::env::var("GROQ_API_KEY").ok())
+            .ok_or_else(|| anyhow!("GROQ_API_KEY is not set in config or environment"))?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         let model = model.unwrap_or_else(|| "llama-3.1-8b-instant".to_string());
         let endpoint = "https://api.groq.com/openai/v1/chat/completions".to_string();
         Ok(Self {
@@ -192,26 +208,39 @@ impl GroqModel {
 
 impl OllamaModel {
     pub fn from_env(model: Option<String>, endpoint: Option<String>) -> Result<Self> {
+        let config = crate::config::load_global_config();
         let model = model
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
             .unwrap_or_else(|| "llama3.1:8b".to_string());
         let endpoint = endpoint
+            .or_else(|| config.ollama_url)
             .or_else(|| std::env::var("OLLAMA_URL").ok())
             .unwrap_or_else(|| "http://localhost:11434/api/generate".to_string());
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Ok(Self {
-            client: Client::new(),
+            client,
             model,
             endpoint,
         })
     }
 }
 
+static GEMINI_LAST_REQUEST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
 impl GeminiModel {
     pub fn from_env(model: Option<String>) -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| anyhow!("GEMINI_API_KEY environment variable is not set"))?;
-        let client = Client::new();
-        let model = model.unwrap_or_else(|| "gemini-2.5-flash".to_string());
+        let config = crate::config::load_global_config();
+        let api_key = config.gemini_api_key
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+            .ok_or_else(|| anyhow!("GEMINI_API_KEY is not set in config or environment"))?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        let model = model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
         let endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key);
         Ok(Self {
             client,
@@ -220,13 +249,53 @@ impl GeminiModel {
             endpoint,
         })
     }
+
+    fn wait_for_request_slot(&self) {
+        // Free tier is 15 RPM (4 seconds per request)
+        let min_interval_ms = std::env::var("GEMINI_MIN_REQUEST_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(4100);
+        let min_interval = Duration::from_millis(min_interval_ms);
+        let gate = GEMINI_LAST_REQUEST_AT.get_or_init(|| Mutex::new(None));
+
+        loop {
+            let sleep_for = {
+                let mut last = gate.lock().expect("request gate lock poisoned");
+                match *last {
+                    Some(prev) => {
+                        let elapsed = prev.elapsed();
+                        if elapsed >= min_interval {
+                            *last = Some(Instant::now());
+                            Duration::ZERO
+                        } else {
+                            min_interval - elapsed
+                        }
+                    }
+                    None => {
+                        *last = Some(Instant::now());
+                        Duration::ZERO
+                    }
+                }
+            };
+            if sleep_for.is_zero() {
+                break;
+            }
+            thread::sleep(sleep_for);
+        }
+    }
 }
 
 impl OpenRouterModel {
     pub fn from_env(model: Option<String>) -> Result<Self> {
-        let api_key = std::env::var("OPENROUTER_API_KEY")
-            .map_err(|_| anyhow!("OPENROUTER_API_KEY environment variable is not set"))?;
-        let client = Client::new();
+        let config = crate::config::load_global_config();
+        let api_key = config.openrouter_api_key
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .ok_or_else(|| anyhow!("OPENROUTER_API_KEY is not set in config or environment"))?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         // Default to a stable Free Router (2026 choice)
         let model = model.unwrap_or_else(|| "google/gemini-2.0-flash-001:free".to_string());
         let endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
@@ -345,6 +414,22 @@ struct GeminiCandidate {
     content: GeminiContent,
 }
 
+#[derive(Serialize)]
+struct GeminiEmbeddingRequest {
+    model: String,
+    content: GeminiContent,
+}
+
+#[derive(Deserialize)]
+struct GeminiEmbeddingResponse {
+    embedding: GeminiEmbeddingValue,
+}
+
+#[derive(Deserialize)]
+struct GeminiEmbeddingValue {
+    values: Vec<f32>,
+}
+
 impl CodexModel for GroqModel {
     fn complete(&self, prompt: &str) -> Result<String> {
         self.complete_chat("You are a helpful coding assistant.", prompt)
@@ -431,6 +516,8 @@ impl CodexModel for OllamaModel {
 
 impl CodexModel for GeminiModel {
     fn complete(&self, prompt: &str) -> Result<String> {
+        self.wait_for_request_slot();
+        
         let body = GeminiRequest {
             contents: vec![GeminiContent {
                 role: "user".to_string(),
@@ -459,7 +546,7 @@ impl CodexModel for GeminiModel {
         };
 
         let mut attempts = 0;
-        let max_attempts = 5;
+        let max_attempts = 0; // Seamlessly fail over to Groq immediately
 
         loop {
             let response = self
@@ -521,6 +608,60 @@ impl CodexModel for GeminiModel {
     }
 }
 
+impl EmbeddingProvider for GeminiModel {
+    fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        self.wait_for_request_slot();
+        
+        // Embeddings use the text-embedding-004 model regardless of the chat model
+        let embed_endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}",
+            self.api_key
+        );
+
+        let body = GeminiEmbeddingRequest {
+            model: "models/text-embedding-004".to_string(),
+            content: GeminiContent {
+                role: "user".to_string(),
+                parts: vec![GeminiPart {
+                    text: text.to_string(),
+                }],
+            },
+        };
+
+        let mut attempts = 0;
+        let max_attempts = 3;
+
+        loop {
+            let response = self
+                .client
+                .post(&embed_endpoint)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()?;
+
+            let status = response.status();
+            
+            if status.is_success() {
+                let parsed: GeminiEmbeddingResponse = response.json()?;
+                return Ok(parsed.embedding.values);
+            }
+
+            let err_text = response.text().unwrap_or_default();
+            let is_rate_limited = status.as_u16() == 429 
+                || err_text.contains("RESOURCE_EXHAUSTED")
+                || err_text.contains("quota");
+
+            if is_rate_limited && attempts < max_attempts {
+                attempts += 1;
+                thread::sleep(Duration::from_secs(10 * attempts as u64));
+                continue;
+            }
+
+            return Err(anyhow!("Gemini Embedding API error: {} - {}", status, err_text));
+        }
+    }
+}
+
 impl CodexModel for OpenRouterModel {
     fn complete(&self, prompt: &str) -> Result<String> {
         self.complete_chat("You are a helpful coding assistant.", prompt)
@@ -573,3 +714,116 @@ impl CodexModel for OpenRouterModel {
         Err(anyhow::anyhow!("OpenRouter API returned no content. (This model might be offline or currently returning empty completions)"))
     }
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Automatic Failover: Gemini → Groq after N consecutive rate limits
+// ──────────────────────────────────────────────────────────────────
+
+static GEMINI_RATE_LIMIT_COUNT: OnceLock<Mutex<u32>> = OnceLock::new();
+
+pub struct FallbackModel {
+    primary: Box<dyn CodexModel + Send + Sync>,
+    fallback: Option<Box<dyn CodexModel + Send + Sync>>,
+    max_rate_limits: u32,
+}
+
+impl FallbackModel {
+    /// Create a failover model. `primary` is used by default.
+    /// After `max_rate_limits` consecutive rate limit errors,
+    /// switches to `fallback` for all subsequent calls.
+    pub fn new(primary: Box<dyn CodexModel + Send + Sync>, fallback: Option<Box<dyn CodexModel + Send + Sync>>, max_rate_limits: u32) -> Self {
+        Self { primary, fallback, max_rate_limits }
+    }
+
+    fn rate_limit_count() -> u32 {
+        let gate = GEMINI_RATE_LIMIT_COUNT.get_or_init(|| Mutex::new(0));
+        *gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn increment_rate_limit() -> u32 {
+        let gate = GEMINI_RATE_LIMIT_COUNT.get_or_init(|| Mutex::new(0));
+        let mut count = gate.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        *count
+    }
+
+    fn reset_rate_limit() {
+        let gate = GEMINI_RATE_LIMIT_COUNT.get_or_init(|| Mutex::new(0));
+        let mut count = gate.lock().unwrap_or_else(|e| e.into_inner());
+        *count = 0;
+    }
+
+    fn should_use_fallback(&self) -> bool {
+        self.fallback.is_some() && Self::rate_limit_count() >= self.max_rate_limits
+    }
+}
+
+impl CodexModel for FallbackModel {
+    fn complete(&self, prompt: &str) -> Result<String> {
+        if self.should_use_fallback() {
+            if let Some(fb) = &self.fallback {
+                eprintln!("  ⚡ Using Groq fallback (Gemini rate-limited {} times)", Self::rate_limit_count());
+                return fb.complete(prompt);
+            }
+        }
+
+        match self.primary.complete(prompt) {
+            Ok(result) => {
+                Self::reset_rate_limit();
+                Ok(result)
+            }
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                if msg.contains("429") || msg.contains("resource_exhausted") || msg.contains("rate") || msg.contains("quota") {
+                    let count = Self::increment_rate_limit();
+                    eprintln!("  ⚠ Gemini rate limit #{}", count);
+                    
+                    if let Some(fb) = &self.fallback {
+                        if count >= self.max_rate_limits {
+                            eprintln!("  ⚡ Switching to Groq fallback permanently ({} rate limits hit)", count);
+                        } else {
+                            eprintln!("  ⚡ Using Groq fallback for this request");
+                        }
+                        return fb.complete(prompt);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn complete_chat(&self, system: &str, user: &str) -> Result<String> {
+        if self.should_use_fallback() {
+            if let Some(fb) = &self.fallback {
+                eprintln!("  ⚡ Using Groq fallback (Gemini rate-limited {} times)", Self::rate_limit_count());
+                return fb.complete_chat(system, user);
+            }
+        }
+
+        match self.primary.complete_chat(system, user) {
+            Ok(result) => {
+                Self::reset_rate_limit();
+                Ok(result)
+            }
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                if msg.contains("429") || msg.contains("resource_exhausted") || msg.contains("rate") || msg.contains("quota") {
+                    let count = Self::increment_rate_limit();
+                    eprintln!("  ⚠ Gemini rate limit #{}", count);
+                    
+                    // Instantly use fallback so the user's request doesn't fail
+                    if let Some(fb) = &self.fallback {
+                        if count >= self.max_rate_limits {
+                            eprintln!("  ⚡ Switching to Groq fallback permanently ({} rate limits hit)", count);
+                        } else {
+                            eprintln!("  ⚡ Using Groq fallback for this request");
+                        }
+                        return fb.complete_chat(system, user);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+}
+

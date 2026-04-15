@@ -14,6 +14,16 @@ pub struct AstraConfig {
     pub auth_token: Option<String>,
     #[serde(default)]
     pub auth_provider: Option<String>,
+    #[serde(default)]
+    pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub tavily_api_key: Option<String>,
+    #[serde(default)]
+    pub ollama_url: Option<String>,
 }
 
 pub fn get_global_config_path() -> PathBuf {

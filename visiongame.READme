@@ -1,0 +1,525 @@
+# CIPHER — Full Vision Document
+> A multiplayer chaos sandbox where the rules change every 30 seconds
+
+---
+
+## Core Concept
+
+CIPHER is a browser-based multiplayer arena game built in Rust + WebAssembly.
+Players survive in a shared arena while the community votes on physics and 
+gameplay mutations every 30 seconds. No two rounds are ever the same.
+
+The game is named after its creator — ciphrnotfound. The cipher is never 
+found because the rules never stay the same long enough to crack.
+
+---
+
+## The Game Loop
+
+```
+1. Players join a room (2-8 players)
+2. Countdown starts — 3, 2, 1, GO
+3. Players survive in the arena (dodge, move, outlast)
+4. Every 30 seconds — mutation vote appears
+5. Players vote on the next rule change (10 second window)
+6. Mutation activates — chaos ensues
+7. Last player standing wins the round
+8. Scores update — next round begins
+9. After 5 rounds — winner declared, lobby resets
+```
+
+---
+
+## Arena
+
+The arena is a bounded 2D space rendered on an HTML5 Canvas via WebAssembly.
+
+```
+Default arena:
+- Square bounds: 800x800 units
+- Walls on all four sides
+- Floor with friction
+- Ceiling (or not, depending on mutation)
+- Spawn points in the four corners
+
+Visual style:
+- Dark background (#0a0f1e — Astra blue-black)
+- Neon player outlines (each player gets a unique color)
+- Glowing walls that pulse when mutations activate
+- Particle effects on collisions
+- Mutation activation: full screen flash + shake
+```
+
+---
+
+## Players
+
+Each player is a circle (30px radius default) with:
+- Username displayed above
+- HP bar (100 default)
+- Color unique to their session
+- Trail effect showing recent movement path
+
+### Movement
+```
+Keyboard:   WASD or Arrow Keys
+Mouse:      Click to move toward cursor (auto-pathfind)
+Both:       Can switch mid-game
+```
+
+### Physics (default state)
+```
+- Gravity: 9.8 downward
+- Jump: spacebar, single jump only
+- Max speed: 300 units/second
+- Friction: 0.85 on ground contact
+- Bounce coefficient: 0.3 on wall contact
+- Collision: players push each other (no damage on contact)
+```
+
+### Elimination
+```
+- Players are eliminated by falling out of bounds
+- Players are eliminated by projectiles (certain mutations)
+- Players are eliminated when HP reaches 0
+- Eliminated players spectate with free camera
+```
+
+---
+
+## Mutation System
+
+The heart of CIPHER. Every 30 seconds a vote appears with 4 options.
+Majority wins. Ties are broken randomly.
+
+### Vote UI
+```
+┌─────────────────────────────────────────┐
+│  MUTATION VOTE — 10 seconds             │
+│                                         │
+│  [A] Gravity flips          — 34%       │
+│  [B] Everyone moves 3x      — 28%       │
+│  [C] Controls reversed      — 22%       │
+│  [D] Arena shrinks          — 16%       │
+│                                         │
+│  Press A, B, C, or D to vote            │
+└─────────────────────────────────────────┘
+```
+
+### Mutation Categories
+
+#### PHYSICS MUTATIONS
+```
+gravity_flip        Gravity reverses direction completely
+zero_gravity        Gravity disabled — players float freely
+heavy_gravity       Gravity 5x stronger — everyone sinks fast
+bouncy_world        All surfaces have 0.95 bounce coefficient
+sticky_floor        Friction 10x — moving is a struggle
+ice_world           Friction 0.01 — nobody can stop sliding
+speed_boost         All player max speeds doubled
+slow_motion         All physics run at 0.4x speed
+giant_players       All player radii triple (90px)
+tiny_players        All player radii shrink to 8px
+```
+
+#### CONTROL MUTATIONS
+```
+reversed_controls   Left is right, up is down
+inverted_jump       Jump sends you downward
+random_keys         WASD randomly remapped every 5 seconds
+mouse_only          Keyboard input disabled
+keyboard_only       Mouse input disabled  
+drift_controls      Input has 0.5 second delay
+rotated_controls    Controls rotate 90 degrees clockwise
+```
+
+#### ARENA MUTATIONS
+```
+shrinking_arena     Walls close in 2 units per second
+expanding_arena     Walls push out — more space to hide
+dark_arena          Visibility radius 150px around each player
+tilting_arena       Arena rotates 1 degree per second
+floor_is_lava       Bottom wall deals 10 damage per second
+portals_active      4 portals appear — entering one exits another
+disappearing_floor  Floor tiles randomly disappear every 3 seconds
+moving_walls        Walls oscillate in/out at 0.5hz
+```
+
+#### PLAYER MUTATIONS
+```
+invisible_players   All players invisible (names still show)
+ghost_mode          Players phase through each other
+random_teleport     All players teleport every 15 seconds
+hp_drain            Everyone loses 2 HP per second
+hp_regen            Everyone gains 1 HP per second
+swap_positions      All players swap positions randomly
+color_blind         Everyone's color becomes identical gray
+clone_mode          Each player spawns a mirrored AI clone
+```
+
+#### PROJECTILE MUTATIONS
+```
+ball_rain           Balls drop from ceiling randomly
+bouncy_balls        Indestructible balls spawn and bounce forever
+homing_missiles     Slow projectiles that track nearest player
+black_holes         3 black holes spawn, pull players in
+```
+
+#### CHAOS WILDCARDS (rare — 10% chance to appear in vote)
+```
+all_mutations       Every active mutation enables simultaneously
+mutation_roulette   Random mutation activates every 5 seconds
+winner_controls     Round winner picks next mutation manually
+reverse_vote        Losing vote activates instead of winning
+everything_fine     All mutations disabled — 30 seconds of peace
+```
+
+### Mutation Stacking
+Mutations stack. After 5 rounds of voting you might have:
+- Zero gravity + invisible players + random teleport + ball rain
+That combination has never happened before. It will never happen the same way again.
+
+---
+
+## Scoring System
+
+```
+Survive 30 seconds:     +10 points
+Survive a mutation:     +5 points
+Last player standing:   +50 points
+Win the round:          +100 points
+Voted for winning mutation: +2 points
+Most creative death:    Community vote after round — +25 points
+```
+
+Leaderboard resets every session. Global leaderboard tracks all-time wins.
+
+---
+
+## Game Modes
+
+### CHAOS (default)
+Standard mode. 2-8 players. Mutations every 30 seconds. 5 rounds.
+
+### SPEED RUN
+Mutations every 10 seconds instead of 30. For experienced players.
+Games last approximately 3 minutes of pure insanity.
+
+### DEMOCRACY
+Every mutation vote requires 100% consensus. One player can veto.
+Forces negotiation and betrayal. 
+
+### SOLO SURVIVAL
+Single player. Mutations chosen randomly by the server.
+Survive as many rounds as possible. Global leaderboard.
+Share your run with a link — others can watch your replay.
+
+### CIPHER ROYALE
+16 players. One giant arena. Mutations every 45 seconds.
+Arena shrinks permanently after each mutation regardless of vote.
+Last 3 players standing win.
+
+---
+
+## Multiplayer Architecture
+
+```
+Client (Rust + WASM):
+- Game rendering (Canvas 2D)
+- Physics simulation (client-side prediction)
+- Input handling
+- Vote UI
+
+Server (Rust + Tokio):
+- WebSocket connections
+- Authoritative game state
+- Mutation scheduling
+- Vote tallying
+- Collision arbitration
+- Anti-cheat validation
+
+Protocol:
+- Binary serialization (bincode or messagepack)
+- 60 tick rate server
+- Client interpolation for smooth movement
+- State reconciliation on mismatch
+```
+
+### Room System
+```
+Public rooms:    Join any available room instantly
+Private rooms:   Create room with 6-character code, share with friends
+Spectate:        Watch any public room without playing
+Replay:          Every game is recorded, shareable via link
+```
+
+---
+
+## UI / UX Design
+
+### Color System
+```
+Background:      #0a0f1e  (deep navy — matches Astra brand)
+Arena floor:     #0d1526
+Wall default:    #1a2744
+Wall mutation:   Pulses with mutation color
+Player colors:   8 unique neons — cyan, green, orange, 
+                 pink, yellow, purple, red, white
+UI text:         #f0f4ff
+UI accent:       #2B8EF0  (Astra blue)
+Danger:          #ff5f57
+Success:         #28c840
+Vote A:          #2B8EF0
+Vote B:          #28c840  
+Vote C:          #febc2e
+Vote D:          #ff5f57
+```
+
+### Font
+```
+Headings:  Syne (matches Astra brand)
+Game UI:   JetBrains Mono (terminal feel, readable in motion)
+```
+
+### Screens
+
+#### Landing / Lobby
+```
+- Game logo (CIPHER in large Syne font)
+- "Play Now" button (instant join public room)
+- "Create Private Room" button
+- "Solo Survival" button  
+- Live count: "847 players online right now"
+- Recent chaos feed: "zerogravity + invisibleplayers just activated in Room #4421"
+- How to play — 3 bullet points max
+```
+
+#### In-Game HUD
+```
+Top left:     Round X/5 — Timer — Active mutations list
+Top center:   Player count remaining
+Top right:    Your score — Global position
+Bottom:       Mutation vote (when active)
+Center:       Arena (full screen)
+```
+
+#### Post-Round Screen
+```
+- Winner announced with animation
+- Round stats (who survived longest, craziest death)
+- Score update
+- "Most creative death" community vote
+- 5 second countdown to next round
+```
+
+#### End of Game Screen
+```
+- Final leaderboard
+- Highlight reel (best moments auto-clipped)
+- Share button — generates link to watch replay
+- Play Again / New Room buttons
+```
+
+---
+
+## Tech Stack
+
+### Game Engine
+```
+Rust            Core game logic, physics, mutations
+wasm-pack       Compiles Rust to WebAssembly
+web-sys         Browser API bindings (Canvas, WebSockets)
+```
+
+### Physics
+```
+rapier2d        2D physics engine — handles collision,
+                gravity, forces, joints
+                Written in Rust, works perfectly with WASM
+```
+
+### Rendering
+```
+HTML5 Canvas    2D rendering via web-sys
+                No heavy WebGL needed for this style
+                Smooth 60fps in browser
+```
+
+### Multiplayer
+```
+tokio           Async Rust runtime for server
+tokio-tungstenite  WebSocket server
+serde + bincode Binary serialization for game state
+```
+
+### Frontend Shell
+```
+React           Lobby, menus, leaderboard, vote UI
+Tailwind        Styling
+Framer Motion   Mutation activation animations
+```
+
+### Backend
+```
+Rust + Axum     HTTP server for lobby/matchmaking
+Redis           Room state, active sessions
+PostgreSQL      Persistent leaderboard, replays
+```
+
+### Deployment
+```
+Cloudflare Workers  Edge WebSocket handling
+Cloudflare R2       Replay storage
+Fly.io              Game server hosting
+Vercel              Frontend
+```
+
+---
+
+## Viral Mechanics
+
+### Built-in sharing
+```
+- Every game generates a shareable replay link
+- Shareable room codes (6 characters, easy to type)
+- "Chaos moment" clips — auto-detect wild mutation combos
+  and generate a GIF shareable to X/Twitter
+- Leaderboard is public — link your profile
+```
+
+### The chaos feed
+Public feed on landing page showing real-time mutations happening globally:
+```
+"Room #8821: zero_gravity + invisible_players + ball_rain just activated"
+"Room #4401: ALL MUTATIONS ACTIVE — 6 players remaining"
+"Room #2211: democracy mode — players stuck voting for 45 seconds 😭"
+```
+
+People will watch this feed just for entertainment.
+
+### Developer credibility
+```
+- "Built in Rust + WebAssembly" is genuinely impressive
+- Post the Rust code on GitHub — developers will star it
+- Write a dev blog about compiling Rust to WASM for a game
+- That post alone gets you 500+ readers on dev.to
+```
+
+---
+
+## Development Phases
+
+### Phase 1 — Solo Playable (Week 1)
+```
+[ ] Basic arena renders in Canvas via WASM
+[ ] Player spawns and moves (keyboard + mouse)
+[ ] Basic gravity and collision physics (rapier2d)
+[ ] 5 mutations working (gravity_flip, speed_boost, 
+    reversed_controls, giant_players, dark_arena)
+[ ] Solo survival mode — survive as long as possible
+[ ] Death and respawn
+[ ] Score counter
+```
+
+### Phase 2 — Multiplayer (Week 2)
+```
+[ ] WebSocket server in Rust
+[ ] 2-4 players in same arena
+[ ] Client-side prediction
+[ ] Server reconciliation
+[ ] Room creation and joining
+[ ] Player names and colors
+```
+
+### Phase 3 — Full Mutation System (Week 3)
+```
+[ ] All 40+ mutations implemented
+[ ] Mutation vote UI
+[ ] Vote tallying and activation
+[ ] Mutation stacking
+[ ] Chaos wildcard mutations
+[ ] Visual effects per mutation
+```
+
+### Phase 4 — Polish and Ship (Week 4)
+```
+[ ] Landing page
+[ ] All game modes
+[ ] Leaderboard
+[ ] Replay system
+[ ] Shareable links
+[ ] Mobile touch support
+[ ] Performance optimization
+[ ] Deploy to production
+```
+
+---
+
+## Repository Structure
+
+```
+cipher/
+├── client/                 # Rust WASM game client
+│   ├── src/
+│   │   ├── lib.rs          # WASM entry point
+│   │   ├── game.rs         # Core game loop
+│   │   ├── physics.rs      # rapier2d integration
+│   │   ├── renderer.rs     # Canvas 2D rendering
+│   │   ├── player.rs       # Player entity
+│   │   ├── mutations.rs    # All 40+ mutations
+│   │   ├── input.rs        # Keyboard + mouse input
+│   │   └── network.rs      # WebSocket client
+│   └── Cargo.toml
+│
+├── server/                 # Rust game server
+│   ├── src/
+│   │   ├── main.rs         # Server entry point
+│   │   ├── room.rs         # Room management
+│   │   ├── game_state.rs   # Authoritative state
+│   │   ├── physics.rs      # Server-side physics
+│   │   ├── mutations.rs    # Mutation scheduling
+│   │   └── websocket.rs    # WS connection handling
+│   └── Cargo.toml
+│
+├── shared/                 # Shared types between client/server
+│   ├── src/
+│   │   ├── lib.rs
+│   │   ├── messages.rs     # WS message types
+│   │   ├── player.rs       # Shared player state
+│   │   └── mutations.rs    # Mutation enum (shared)
+│   └── Cargo.toml
+│
+├── frontend/               # React shell
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── pages/
+│   │   │   ├── Lobby.tsx
+│   │   │   ├── Game.tsx
+│   │   │   └── Leaderboard.tsx
+│   │   └── components/
+│   │       ├── VoteUI.tsx
+│   │       ├── HUD.tsx
+│   │       └── ChaosFeed.tsx
+│   └── package.json
+│
+└── Cargo.toml              # Workspace
+```
+
+---
+
+## The One Line Pitch
+
+> "A multiplayer chaos game where the laws of physics are decided by democracy — and democracy always chooses violence."
+
+---
+
+## Why This Gets Built In April
+
+- Rust skills from March carry directly into this
+- WASM is the next logical step after CLI Rust
+- Ships in 4 weeks with the phased approach
+- Immediately playable and shareable
+- Completely different from Astra — shows range
+- Goes viral on its own merit
+
+cipher was never found. now it's a game. 🎮

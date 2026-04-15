@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use crate::git::GitRepo;
+use crate::model::EmbeddingProvider;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LearningPhase {
@@ -24,6 +26,8 @@ pub struct MemoryEntry {
     pub timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<MemoryEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -324,6 +328,7 @@ impl MemoryStore {
             content,
             timestamp: now_secs(),
             event: None,
+            embedding: None,
         });
     }
 
@@ -337,6 +342,7 @@ impl MemoryStore {
             content,
             timestamp: now_secs(),
             event: Some(event),
+            embedding: None,
         });
     }
 
@@ -361,7 +367,7 @@ impl MemoryStore {
             .collect()
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+    pub fn search(&self, query: &str, query_embedding: Option<&[f32]>, limit: usize) -> Vec<MemoryEntry> {
         let trimmed = query.trim().to_ascii_lowercase();
         if trimmed.is_empty() {
             return Vec::new();
@@ -393,30 +399,62 @@ impl MemoryStore {
             return matches;
         }
 
-        // Rank by match count
-        let mut scored_matches: Vec<(usize, MemoryEntry)> = all_entries.iter().rev().map(|entry| {
+        // Rank by match count OR cosine similarity
+        let mut scored_matches: Vec<(f32, MemoryEntry)> = all_entries.iter().rev().map(|entry| {
+            let mut score = 0.0;
             let content_lower = entry.content.to_ascii_lowercase();
-            let mut score = 0;
+            
+            // Keyword match
             for token in &query_tokens {
                 if content_lower.contains(token) {
-                    score += 1;
+                    score += 0.2; // base score for keywords
                 }
             }
-            if entry.kind == "user-identity"
-                || entry.kind == "user-preference"
-                || entry.kind == "project-fact"
-                || entry.kind == "style-memory"
-                || entry.kind == "fact"
-            {
-                score += 1;
+            if entry.kind == "user-identity" || entry.kind == "user-preference" || entry.kind == "project-fact" || entry.kind == "fact" {
+                score += 0.5;
             }
+
+            // Vector match
+            if let Some(q_vec) = query_embedding {
+                if let Some(entry_vec) = &entry.embedding {
+                    let sim = cosine_similarity(q_vec, entry_vec);
+                    if sim > 0.6 {
+                        score += sim; // boost significantly
+                    }
+                }
+            }
+
             (score, (*entry).clone())
-        }).filter(|(score, _)| *score > 0).collect();
+        }).filter(|(score, _)| *score > 0.0).collect();
 
         // Sort by score (descending)
-        scored_matches.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_matches.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         scored_matches.into_iter().take(limit).map(|(_, e)| e).collect()
+    }
+
+    /// Iterates over all memories without embeddings and calls the Gemini API to get them.
+    /// This happens asynchronously or in a background pass so the user doesn't wait forever.
+    pub fn embed_all(&mut self, embedder: &dyn EmbeddingProvider) {
+        let mut updated = false;
+        let mut count = 0;
+        
+        // Reverse because we want to embed the newest memories first
+        for entry in self.entries.iter_mut().rev() {
+            if entry.embedding.is_none() && entry.content.len() > 10 {
+                if let Ok(vec) = embedder.get_embedding(&entry.content) {
+                    entry.embedding = Some(vec);
+                    updated = true;
+                    count += 1;
+                    if count >= 1 { // batch size limit to 1 so we don't block the REPL
+                        break;
+                    }
+                }
+            }
+        }
+        if updated {
+            let _ = self.save();
+        }
     }
 
     pub fn compact_noise(&mut self) -> usize {
@@ -504,6 +542,7 @@ impl MemoryStore {
                 content,
                 timestamp: now_secs(),
                 event: None,
+                embedding: None,
             });
             return;
         }
@@ -542,4 +581,19 @@ fn dedupe_keyed_pairs(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = seen.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for (va, vb) in a.iter().zip(b.iter()) {
+        dot += va * vb;
+        norm_a += va * va;
+        norm_b += vb * vb;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a.sqrt() * norm_b.sqrt())
 }

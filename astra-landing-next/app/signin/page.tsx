@@ -16,12 +16,12 @@ export default function SignInPage() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <Link href="/" className="flex items-center justify-center gap-2 mb-12">
-          <div className="w-10 h-10 border border-gray-900 bg-white flex items-center justify-center shrink-0">
-            <img src="/astra-logo-2.jpg" alt="Astra Logo" className="w-full h-full object-contain" />
+          <div className="w-10 h-10 md:h-32 md:w-32  flex items-center justify-center shrink-0">
+            <img src="/astra-logo-2.png" alt="Astra Logo" className="w-full h-full object-contain" />
           </div>
-          <span className="text-xl font-medium text-gray-900 tracking-tight" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
+          {/* <span className="text-xl font-medium text-gray-900 tracking-tight" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
             Astra
-          </span>
+          </span> */}
         </Link>
 
         {/* Sign In Form */}

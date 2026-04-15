@@ -7,11 +7,11 @@ const useCases = [
   {
     icon: Users,
     tag: 'For Teams',
-    title: 'Modernize legacy codebases',
-    description: 'Migrate from JavaScript to TypeScript, or TypeScript to Rust. Astra handles the complexity while your team stays productive.',
+    title: 'Onboard developers instantly',
+    description: 'New team members ask Astra "why did we build it this way?" and get answers from your git history, not outdated docs.',
     metrics: [
-      { label: 'Migration time', value: '10x faster' },
-      { label: 'Code accuracy', value: '99.9%' },
+      { label: 'Onboarding time', value: '10x faster' },
+      { label: 'Context retention', value: '100%' },
     ],
   },
   {
@@ -27,11 +27,11 @@ const useCases = [
   {
     icon: Building2,
     tag: 'For Enterprises',
-    title: 'Scale with confidence',
-    description: 'Refactor entire microservices architectures. Astra validates every change across your entire codebase before deployment.',
+    title: 'Track codebase health',
+    description: 'Real-time health scores for code quality, security surface, test coverage, and team velocity. Prevent technical debt before it happens.',
     metrics: [
-      { label: 'Services migrated', value: '100+' },
-      { label: 'Zero downtime', value: '100%' },
+      { label: 'Health visibility', value: '100%' },
+      { label: 'Debt prevention', value: '80%' },
     ],
   },
 ];
@@ -58,64 +58,45 @@ export default function UseCases() {
           </h2>
         </motion.div>
 
-        <div className="space-y-4 md:space-y-8">
+        <div className="grid md:grid-cols-3 gap-6 md:gap-8">
           {useCases.map((useCase, index) => (
             <motion.div
               key={useCase.title}
-              initial={{ opacity: 0 }}
-              whileInView={{ opacity: 1 }}
-              viewport={{ once: true, margin: '-100px' }}
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: '-50px' }}
               transition={{ 
-                duration: 0.6,
-                delay: index * 0.15,
+                duration: 0.5,
+                delay: index * 0.1,
                 ease: 'easeOut',
               }}
               className="group relative"
             >
-              <div className="relative bg-[#faf9f6] border border-gray-200 p-6 md:p-8 lg:p-10 transition-all duration-300 hover:border-gray-900">
-                <div className="grid md:grid-cols-[1fr,auto] gap-6 md:gap-8 items-center">
-                  <div>
-                    <div className="inline-flex items-center gap-2 mb-3 md:mb-4">
-                      <div className="w-7 h-7 md:w-8 md:h-8 border border-gray-900 bg-white flex items-center justify-center">
-                        <useCase.icon className="w-3.5 h-3.5 md:w-4 md:h-4 text-gray-900" />
-                      </div>
-                      <span className="text-xs font-medium text-gray-700">
-                        {useCase.tag}
-                      </span>
+              <div className="relative bg-[#faf9f6] border border-gray-200 p-6 md:p-8 h-full transition-all duration-300 hover:border-gray-900 hover:shadow-lg hover:-translate-y-1">
+                <div className="mb-4 md:mb-6">
+                  <div className="w-10 h-10 md:w-12 md:h-12 border border-gray-900 bg-white flex items-center justify-center mb-3 transition-transform duration-300 group-hover:scale-110">
+                    <useCase.icon className="w-5 h-5 md:w-6 md:h-6 text-gray-900" />
+                  </div>
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                    {useCase.tag}
+                  </span>
+                </div>
+                
+                <h3 className="text-xl md:text-2xl font-medium text-gray-900 mb-3 md:mb-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
+                  {useCase.title}
+                </h3>
+                
+                <p className="text-sm md:text-base text-gray-600 leading-relaxed mb-6">
+                  {useCase.description}
+                </p>
+
+                <div className="space-y-3 pt-4 border-t border-gray-200">
+                  {useCase.metrics.map((metric) => (
+                    <div key={metric.label} className="flex items-center justify-between">
+                      <span className="text-xs text-gray-500 uppercase tracking-wide">{metric.label}</span>
+                      <span className="text-sm font-medium text-gray-900">{metric.value}</span>
                     </div>
-                    
-                    <h3 className="text-xl md:text-2xl lg:text-3xl font-medium text-gray-900 mb-3 md:mb-4" style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}>
-                      {useCase.title}
-                    </h3>
-                    
-                    <p className="text-sm md:text-base text-gray-600 leading-relaxed mb-4 md:mb-6 max-w-xl">
-                      {useCase.description}
-                    </p>
-
-                    <button className="inline-flex items-center gap-2 text-xs md:text-sm text-gray-900 font-medium group/btn">
-                      <span>Learn more</span>
-                      <ArrowRight className="w-3 h-3 md:w-4 md:h-4 transition-transform group-hover/btn:translate-x-1" />
-                    </button>
-                  </div>
-
-                  <div className="flex flex-row md:flex-col gap-3 md:gap-4">
-                    {useCase.metrics.map((metric) => (
-                      <div
-                        key={metric.label}
-                        className="bg-white border border-gray-200 p-4 md:p-6 min-w-[120px] md:min-w-[140px] transition-all duration-300 hover:border-gray-900"
-                      >
-                        <div
-                          className="text-2xl md:text-3xl font-medium text-gray-900 mb-1 md:mb-2"
-                          style={{ fontFamily: 'var(--font-cabinet-grotesk)' }}
-                        >
-                          {metric.value}
-                        </div>
-                        <div className="text-[10px] md:text-xs text-gray-500 uppercase tracking-wide">
-                          {metric.label}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  ))}
                 </div>
               </div>
             </motion.div>
@@ -126,11 +107,11 @@ export default function UseCases() {
           initial={{ opacity: 0 }}
           whileInView={{ opacity: 1 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.6, delay: 0.6 }}
+          transition={{ duration: 0.6, delay: 0.4 }}
           className="mt-12 md:mt-16 text-center"
         >
           <p className="text-sm md:text-base text-gray-600 mb-4 md:mb-6 px-4">
-            Ready to transform your codebase?
+            Ready to give your codebase a memory?
           </p>
           <button className="relative group overflow-hidden bg-gray-900 text-white px-6 md:px-8 py-3 md:py-4 text-xs md:text-sm font-medium transition-all hover:shadow-lg">
             <span className="relative z-10">Get started for free</span>

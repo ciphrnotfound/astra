@@ -71,6 +71,10 @@ pub struct TemporalGraph {
     pub file_histories: HashMap<String, FileHistory>,
     pub co_changes: Vec<CoChangePair>,
     pub enriched: bool,
+    /// Watermark: the most recent commit ID we've already processed.
+    /// Used by `enrich_incremental` to skip already-known history.
+    #[serde(default)]
+    pub last_commit_id: Option<String>,
 }
 
 impl TemporalGraph {
@@ -126,6 +130,80 @@ impl TemporalGraph {
 
         // 5. Detect co-change patterns
         self.detect_co_changes(3); // minimum 3 co-changes to be significant
+
+        // Set watermark to the latest commit
+        if let Some(latest) = commits.first() {
+            self.last_commit_id = Some(latest.id.clone());
+        }
+
+        self.enriched = true;
+    }
+
+    /// Incremental enrichment: only process commits newer than our watermark.
+    /// Falls back to full enrichment if no watermark exists.
+    pub fn enrich_incremental(&mut self, git: &GitRepo) {
+        let last_known = match &self.last_commit_id {
+            Some(id) => id.clone(),
+            None => {
+                // No watermark — do a full build
+                self.enrich_from_git(git);
+                return;
+            }
+        };
+
+        let all_commits = match git.recent_commits(500) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        // Find commits newer than our watermark
+        let new_commits: Vec<_> = all_commits
+            .iter()
+            .take_while(|c| c.id != last_known)
+            .collect();
+
+        if new_commits.is_empty() {
+            return; // Nothing new since last index
+        }
+
+        // Process only the new commits
+        for commit_summary in &new_commits {
+            let dev = self
+                .developers
+                .entry(commit_summary.author.clone())
+                .or_insert_with(|| DeveloperNode {
+                    name: commit_summary.author.clone(),
+                    email: None,
+                    first_seen: commit_summary.time,
+                    last_seen: commit_summary.time,
+                    commit_count: 0,
+                });
+            dev.commit_count += 1;
+            if commit_summary.time < dev.first_seen {
+                dev.first_seen = commit_summary.time;
+            }
+            if commit_summary.time > dev.last_seen {
+                dev.last_seen = commit_summary.time;
+            }
+
+            self.commits.push(CommitNode {
+                id: commit_summary.id.clone(),
+                summary: commit_summary.summary.clone(),
+                author: commit_summary.author.clone(),
+                timestamp: commit_summary.time,
+                files_changed: Vec::new(),
+            });
+        }
+
+        // Re-populate file info and rebuild derived data
+        self.populate_commit_files(git);
+        self.build_file_histories();
+        self.detect_co_changes(3);
+
+        // Update watermark
+        if let Some(latest) = all_commits.first() {
+            self.last_commit_id = Some(latest.id.clone());
+        }
 
         self.enriched = true;
     }

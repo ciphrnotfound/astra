@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Syne", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-cipher-bg: #0a0f1e;
+  --color-cipher-panel: #0d1526;
+  --color-cipher-border: #1a2744;
+  --color-cipher-accent: #2b8ef0;
+  --color-cipher-neon: #00e5ff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-cipher-bg);
+  color: #f0f4ff;
+  font-family: var(--font-display);
+}
+
+/* Scanlines + vignette (lightweight “arcade” layer) */
+.cipher-crt::after {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.02) 0px,
+    rgba(255, 255, 255, 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.35;
+}
+
+.cipher-vignette {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 40%,
+    rgba(10, 15, 30, 0.85) 100%
+  );
+}

@@ -1,17 +1,19 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/supabase/server';
-import { getSession } from '@/lib/auth/session';
+import { createClient } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
 export async function GET() {
   try {
-    const session = await getSession();
+    const supabase = await createClient();
     
-    if (!session) {
+    // Get the current user session
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    
+    if (sessionError || !session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { data: apiKeys, error } = await db
+    const { data: apiKeys, error } = await supabase
       .from('api_keys')
       .select('id, name, key_prefix, last_used_at, created_at, expires_at, is_active')
       .eq('user_id', session.user.id)
@@ -42,9 +44,12 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const session = await getSession();
+    const supabase = await createClient();
     
-    if (!session) {
+    // Get the current user session
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    
+    if (sessionError || !session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -62,7 +67,7 @@ export async function POST(request: Request) {
     const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
     const keyPrefix = apiKey.substring(0, 16);
 
-    const { error } = await db
+    const { error } = await supabase
       .from('api_keys')
       .insert({
         user_id: session.user.id,

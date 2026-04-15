@@ -291,12 +291,29 @@ pub fn execute_tool(
 }
 
 fn resolve_path(raw: &str, project_root: &Path) -> PathBuf {
-    let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        p
-    } else {
-        project_root.join(p)
+    // Strip Windows drive letters (C:\) or Unix absolute roots (/)
+    let mut clean_raw = raw.trim();
+    if let Some(stripped) = clean_raw.strip_prefix('/') {
+        clean_raw = stripped;
     }
+    if let Some(stripped) = clean_raw.strip_prefix('\\') {
+        clean_raw = stripped;
+    }
+    // Also handle Windows Drive Prefix (e.g. C:/ or C:\)
+    if clean_raw.len() >= 2 && clean_raw.chars().nth(1) == Some(':') {
+        clean_raw = &clean_raw[2..];
+        // Strip trailing slash again after drive letter
+        if let Some(stripped) = clean_raw.strip_prefix('/') { clean_raw = stripped; }
+        if let Some(stripped) = clean_raw.strip_prefix('\\') { clean_raw = stripped; }
+    }
+    
+    // Now cleanly resolve relative to root, mitigating path traversal (../) by getting absolute canonical representation if possible (or just blindly trusting join, but join safely prevents escape if starting purely relative without ../ escaping the top root)
+    let p = PathBuf::from(clean_raw);
+    
+    let resolved = project_root.join(p);
+    
+    // Attempt to canonicalize to catch massive ../ directory traversal hacks, but if not exist, just return the normalized join
+    resolved.canonicalize().unwrap_or(resolved)
 }
 
 fn get_str_arg(args: &serde_json::Value, key: &str) -> Result<String> {

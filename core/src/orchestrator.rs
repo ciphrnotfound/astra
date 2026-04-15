@@ -29,13 +29,23 @@ pub fn generate_next_task(engine: &mut CodexEngine, goal: Option<&str>) -> Resul
 
     // 1. If we have an active task and NO new explicit goal, continue the existing task
     if goal.is_none() {
-        if let Some(task) = active {
+        if let Some(task) = &active {
             if task.phase == TaskPhase::Reviewing {
-                return generate_review_step(engine, &task);
+                return generate_review_step(engine, task);
             }
             if task.phase == TaskPhase::InProgress {
-                return Ok(json_plan(&task, "Currently Executing... Continuing original plan."));
+                return Ok(json_plan(task, "Currently Executing... Continuing original plan."));
             }
+        }
+    }
+
+    // 2. If there IS a new explicit goal, archive the old task and proceed
+    if goal.is_some() {
+        if let Some(old_task) = &active {
+            engine.memory_mut().add(
+                "task-archived",
+                format!("Archived previous task '{}' (phase: {:?}) to make way for new goal.", old_task.title, old_task.phase),
+            );
         }
     }
 
