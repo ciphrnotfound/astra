@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createServerClient } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
 export async function GET() {
   try {
-    const supabase = await createClient();
+    const supabase = await createServerClient();
     
     // Get the current user session
     const { data: { session }, error: sessionError } = await supabase.auth.getSession();
@@ -44,7 +44,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
+    const supabase = await createServerClient();
     
     // Get the current user session
     const { data: { session }, error: sessionError } = await supabase.auth.getSession();
