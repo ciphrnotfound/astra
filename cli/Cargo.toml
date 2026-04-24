@@ -1,5 +1,6 @@
 [package]
 name = "astra-cli"
+version = "0.1.6"
 
  edition = "2021"
  default-run = "astra-cli"

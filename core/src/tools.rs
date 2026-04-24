@@ -290,6 +290,24 @@ pub fn execute_tool(
     }
 }
 
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let mut vec: Vec<usize> = (0..=s2.len()).collect();
+    for (i, c1) in s1.chars().enumerate() {
+        let mut prev = i;
+        let mut cur;
+        vec[0] = i + 1;
+        for (j, c2) in s2.chars().enumerate() {
+            cur = vec[j + 1];
+            vec[j + 1] = std::cmp::min(
+                prev + if c1 == c2 { 0 } else { 1 },
+                std::cmp::min(vec[j] + 1, vec[j + 1] + 1),
+            );
+            prev = cur;
+        }
+    }
+    *vec.last().unwrap_or(&0)
+}
+
 fn resolve_path(raw: &str, project_root: &Path) -> PathBuf {
     // Strip Windows drive letters (C:\) or Unix absolute roots (/)
     let mut clean_raw = raw.trim();
@@ -302,18 +320,59 @@ fn resolve_path(raw: &str, project_root: &Path) -> PathBuf {
     // Also handle Windows Drive Prefix (e.g. C:/ or C:\)
     if clean_raw.len() >= 2 && clean_raw.chars().nth(1) == Some(':') {
         clean_raw = &clean_raw[2..];
-        // Strip trailing slash again after drive letter
         if let Some(stripped) = clean_raw.strip_prefix('/') { clean_raw = stripped; }
         if let Some(stripped) = clean_raw.strip_prefix('\\') { clean_raw = stripped; }
     }
     
-    // Now cleanly resolve relative to root, mitigating path traversal (../) by getting absolute canonical representation if possible (or just blindly trusting join, but join safely prevents escape if starting purely relative without ../ escaping the top root)
     let p = PathBuf::from(clean_raw);
+    let mut current_resolved = project_root.to_path_buf();
     
-    let resolved = project_root.join(p);
+    for comp in p.components() {
+        match comp {
+            std::path::Component::Normal(comp_os) => {
+                let comp_str = comp_os.to_string_lossy().to_string();
+                let next_path = current_resolved.join(&comp_str);
+                
+                if next_path.exists() {
+                    current_resolved = next_path;
+                } else {
+                    // Try fuzzy matching against siblings
+                    let mut best_match = None;
+                    let mut best_dist = usize::MAX;
+                    
+                    if let Ok(entries) = std::fs::read_dir(&current_resolved) {
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                let dist = levenshtein_distance(&comp_str, &name);
+                                // For short strings, only allow distance 1. For longer strings, allow distance 2.
+                                let allowed_dist = std::cmp::min(2, comp_str.len() / 2);
+                                if dist <= allowed_dist && dist < best_dist {
+                                    best_dist = dist;
+                                    best_match = Some(name);
+                                }
+                            }
+                        }
+                    }
+                    
+                    if let Some(matched) = best_match {
+                        current_resolved = current_resolved.join(matched);
+                    } else {
+                        current_resolved = next_path;
+                    }
+                }
+            },
+            std::path::Component::ParentDir => {
+                // Ensure we do not pop beyond project_root
+                if current_resolved.starts_with(project_root) && current_resolved != project_root {
+                    current_resolved.pop();
+                }
+            },
+            std::path::Component::CurDir => {},
+            _ => {},
+        }
+    }
     
-    // Attempt to canonicalize to catch massive ../ directory traversal hacks, but if not exist, just return the normalized join
-    resolved.canonicalize().unwrap_or(resolved)
+    current_resolved.canonicalize().unwrap_or(current_resolved)
 }
 
 fn get_str_arg(args: &serde_json::Value, key: &str) -> Result<String> {
