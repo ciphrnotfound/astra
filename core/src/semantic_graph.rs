@@ -85,8 +85,12 @@ impl TemporalGraph {
     /// Walk the git history and build the temporal dimension.
     /// This uses ZERO Gemini API calls — pure git2 analysis.
     pub fn enrich_from_git(&mut self, git: &GitRepo) {
-        // Get recent commits (up to 500 for a rich history)
-        let commits = match git.recent_commits(500) {
+        self.developers.clear();
+        self.commits.clear();
+        self.file_histories.clear();
+        self.co_changes.clear();
+
+        let commits = match git.all_commits() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -151,10 +155,15 @@ impl TemporalGraph {
             }
         };
 
-        let all_commits = match git.recent_commits(500) {
+        let all_commits = match git.all_commits() {
             Ok(c) => c,
             Err(_) => return,
         };
+
+        if self.commits.len() < all_commits.len() {
+            self.enrich_from_git(git);
+            return;
+        }
 
         // Find commits newer than our watermark
         let new_commits: Vec<_> = all_commits
@@ -216,7 +225,6 @@ impl TemporalGraph {
                 "log",
                 "--name-only",
                 "--format=%H",
-                "-500",
             ])
             .output();
 
@@ -438,6 +446,159 @@ impl TemporalGraph {
             }
             if files.len() > 10 {
                 let _ = writeln!(&mut out, "   ... and {} more", files.len() - 10);
+            }
+        }
+
+        out
+    }
+
+    pub fn project_history_report(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(&mut out, "📚 Project History Report");
+        let _ = writeln!(&mut out, "════════════════════════════════════════");
+
+        if self.commits.is_empty() {
+            let _ = writeln!(&mut out, "\nNo git history has been indexed yet.");
+            return out;
+        }
+
+        let first_commit = self.commits.iter().min_by_key(|commit| commit.timestamp);
+        let latest_commit = self.commits.iter().max_by_key(|commit| commit.timestamp);
+        let recent_window = latest_commit
+            .map(|commit| commit.timestamp - 90 * 86_400)
+            .unwrap_or(0);
+        let recent_commits = self
+            .commits
+            .iter()
+            .filter(|commit| commit.timestamp >= recent_window)
+            .count();
+
+        let _ = writeln!(
+            &mut out,
+            "\nTimeline: {} total commits, {} developers, {} tracked files",
+            self.commits.len(),
+            self.developers.len(),
+            self.file_histories.len()
+        );
+        if let Some(first) = first_commit {
+            let date = chrono::DateTime::from_timestamp(first.timestamp, 0)
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = writeln!(
+                &mut out,
+                "First indexed commit: {} — {} ({})",
+                date,
+                first.summary,
+                first.author
+            );
+        }
+        if let Some(latest) = latest_commit {
+            let date = chrono::DateTime::from_timestamp(latest.timestamp, 0)
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = writeln!(
+                &mut out,
+                "Latest indexed commit: {} — {} ({})",
+                date,
+                latest.summary,
+                latest.author
+            );
+        }
+        let _ = writeln!(
+            &mut out,
+            "Recent momentum: {} commits in roughly the last 90 days",
+            recent_commits
+        );
+
+        let mut top_devs = self.developers.values().collect::<Vec<_>>();
+        top_devs.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+        if !top_devs.is_empty() {
+            let _ = writeln!(&mut out, "\nTop contributors:");
+            for dev in top_devs.into_iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {}: {} commits",
+                    dev.name,
+                    dev.commit_count
+                );
+            }
+        }
+
+        let mut hotspots = self.file_histories.values().collect::<Vec<_>>();
+        hotspots.sort_by(|a, b| b.total_changes.cmp(&a.total_changes));
+        if !hotspots.is_empty() {
+            let _ = writeln!(&mut out, "\nChange hotspots:");
+            for file in hotspots.into_iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {} ({} commits, owner: {}, stale: {}d)",
+                    file.path,
+                    file.total_changes,
+                    file.primary_owner.as_deref().unwrap_or("unknown"),
+                    file.staleness_days
+                );
+            }
+        }
+
+        if !self.co_changes.is_empty() {
+            let _ = writeln!(&mut out, "\nStrong coupling pairs:");
+            for pair in self.co_changes.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {} <-> {} ({} co-changes, {:.0}% coupling)",
+                    pair.file_a,
+                    pair.file_b,
+                    pair.co_change_count,
+                    pair.coupling_score * 100.0
+                );
+            }
+        }
+
+        out
+    }
+
+    pub fn hotspot_report(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(&mut out, "🔥 Change Hotspots");
+        let _ = writeln!(&mut out, "════════════════════════════════════════");
+
+        if self.file_histories.is_empty() {
+            let _ = writeln!(&mut out, "\nNo file history has been indexed yet.");
+            return out;
+        }
+
+        let mut hotspots = self.file_histories.values().collect::<Vec<_>>();
+        hotspots.sort_by(|a, b| {
+            b.total_changes
+                .cmp(&a.total_changes)
+                .then_with(|| a.staleness_days.cmp(&b.staleness_days))
+        });
+
+        let _ = writeln!(&mut out, "\nMost changed files:");
+        for file in hotspots.iter().take(10) {
+            let author_count = file.authors.len();
+            let _ = writeln!(
+                &mut out,
+                "- {} (commits={}, owner={}, authors={}, stale={}d)",
+                file.path,
+                file.total_changes,
+                file.primary_owner.as_deref().unwrap_or("unknown"),
+                author_count,
+                file.staleness_days
+            );
+        }
+
+        if !self.co_changes.is_empty() {
+            let _ = writeln!(&mut out, "\nFiles that move together:");
+            for pair in self.co_changes.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {} <-> {} ({} co-changes, {:.0}% coupling)",
+                    pair.file_a,
+                    pair.file_b,
+                    pair.co_change_count,
+                    pair.coupling_score * 100.0
+                );
             }
         }
 

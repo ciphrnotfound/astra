@@ -194,6 +194,14 @@ impl GitRepo {
     }
 
     pub fn recent_commits(&self, limit: usize) -> Result<Vec<CommitSummary>> {
+        self.collect_commits(Some(limit))
+    }
+
+    pub fn all_commits(&self) -> Result<Vec<CommitSummary>> {
+        self.collect_commits(None)
+    }
+
+    fn collect_commits(&self, limit: Option<usize>) -> Result<Vec<CommitSummary>> {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.push_head()?;
         let mut commits = Vec::new();
@@ -208,8 +216,10 @@ impl GitRepo {
                 Err(_) => continue,
             };
             commits.push(self.summarize_commit(&commit));
-            if commits.len() >= limit {
-                break;
+            if let Some(limit) = limit {
+                if commits.len() >= limit {
+                    break;
+                }
             }
         }
 

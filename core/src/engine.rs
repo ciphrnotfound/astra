@@ -1,11 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
-use chrono::Timelike;
 
 use crate::agent::{self, AgentConfig};
 use crate::config::load_global_config;
@@ -20,6 +19,7 @@ use crate::migration;
 use crate::model::{CodexModel, SearchProvider, EmbeddingProvider};
 use crate::parser::{parse_rust_file, ParsedSymbolKind};
 use crate::persona::Persona;
+use crate::rag::{VectorStore, chunk_file, format_chunks_for_prompt};
 use crate::semantic_graph::TemporalGraph;
 use crate::semantic_memory::ConceptStore;
 use crate::scaffold;
@@ -48,6 +48,50 @@ const SKIP_DIRS: &[&str] = &[
     "obj",
 ];
 
+const HELP_TEXT: &str = "\
+◈ ASTRA — Command Reference
+
+🧠 PLAN & EXECUTE
+  :task <goal>        Decompose a goal into subtasks and autonomously execute it
+  :plan               Show the current plan dashboard
+  :plan resume        Continue a paused plan
+  :plan clear         Discard the current plan
+
+📋 PRODUCT MANAGER
+  :spec <idea>        Turn a rough idea into a full spec + AI-agent prompt
+  :ask <idea>         Get the key clarifying questions to scope an idea
+  :sharpen <goal>     Rewrite a vague goal into a sharp, scoped one
+
+🛡️  REVIEW (don't ship rubbish)
+  :review             Review your changed files & give a ship verdict
+  :review all         Review the entire codebase
+  :review --install-gate   Block commits with critical issues (git hook)
+
+🚀 SHIP (git + GitHub)
+  :commit             Stage all changes & commit with an AI-drafted message
+  :ship               Commit + push to the remote branch
+  :pr [base]          Open a pull request (drafts title + body). Default base: main
+  :release <tag>      Cut a GitHub release with AI-drafted notes
+  :standup            Quick standup: tree state, recent work, next step
+
+🔍 UNDERSTAND
+  :search <query>     RAG search over your code (semantic or keyword)
+  :index              Index the codebase + build the semantic/temporal graph
+  :health             Codebase health dashboard
+  :summary            Project summary
+  :history            Project evolution, contributors, and major hotspots
+  :hotspots           Most changed files and risky coupling areas
+  :why <path>         Why does this file exist / its history
+  :owners             Who owns what (bus-factor)
+  :predict            Predictive refactoring / debt forecast
+
+🔧 TRANSFORM
+  :migrate <src> <from> <to> <out> [--ai]   Cross-language migration
+  :fix <path> <bug>   AI-fix a file (verified against build)
+  :vibe <name>        Switch persona
+
+Type any natural-language question to chat. :quit to exit.";
+
 pub struct CodexEngine {
     root: PathBuf,
     index: CodeIndex,
@@ -61,6 +105,7 @@ pub struct CodexEngine {
     auto_approve: bool,
     temporal_graph: TemporalGraph,
     concept_store: ConceptStore,
+    vector_store: VectorStore,
 }
 
 impl CodexEngine {
@@ -104,6 +149,8 @@ impl CodexEngine {
             .unwrap_or_else(|_| ConceptStore::new());
         let index = CodeIndex::load(&global_brain.join("index.json"))
             .unwrap_or_else(|_| CodeIndex::new());
+        let vector_store = VectorStore::load(&global_brain.join("vectors.json"))
+            .unwrap_or_else(|_| VectorStore::new());
 
         register_global_project(&root);
 
@@ -120,6 +167,7 @@ impl CodexEngine {
             auto_approve: false,
             temporal_graph,
             concept_store,
+            vector_store,
         }
     }
 
@@ -138,6 +186,8 @@ impl CodexEngine {
             .unwrap_or_else(|_| ConceptStore::new());
         let index = CodeIndex::load(&global_brain.join("index.json"))
             .unwrap_or_else(|_| CodeIndex::new());
+        let vector_store = VectorStore::load(&global_brain.join("vectors.json"))
+            .unwrap_or_else(|_| VectorStore::new());
 
         register_global_project(&root);
 
@@ -154,6 +204,7 @@ impl CodexEngine {
             auto_approve: false,
             temporal_graph,
             concept_store,
+            vector_store,
         }
     }
 
@@ -172,6 +223,8 @@ impl CodexEngine {
             .unwrap_or_else(|_| ConceptStore::new());
         let index = CodeIndex::load(&global_brain.join("index.json"))
             .unwrap_or_else(|_| CodeIndex::new());
+        let vector_store = VectorStore::load(&global_brain.join("vectors.json"))
+            .unwrap_or_else(|_| VectorStore::new());
 
         register_global_project(&root);
 
@@ -188,6 +241,7 @@ impl CodexEngine {
             auto_approve: false,
             temporal_graph,
             concept_store,
+            vector_store,
         }
     }
 
@@ -248,30 +302,24 @@ impl CodexEngine {
         // ── Fast-path: instant greetings (skip ALL heavy processing) ──
         {
             let lower = trimmed.to_ascii_lowercase();
-            if lower == "hey" || lower == "hi" || lower == "hello"
-                || lower == "hey astra" || lower == "hi astra" || lower == "hello astra"
-                || lower == "astra" || lower == "sup" || lower == "yo"
-            {
-                let hour = chrono::Local::now().hour();
-                let greeting = match hour {
-                    5..=11 => "Good morning",
-                    12..=16 => "Good afternoon",
-                    17..=21 => "Good evening",
-                    _ => "Hey",
-                };
+            if is_social_message(trimmed) {
                 let user = crate::config::load_global_config()
                     .user
                     .unwrap_or_else(|| "there".to_string());
-                // Check if there's an active task to mention
-                let task_path = self.root.join(".astra").join("active_task.json");
-                if let Ok(task_content) = std::fs::read_to_string(&task_path) {
-                    if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
-                        if let Some(title) = task.get("title").and_then(|t| t.as_str()) {
-                            return Ok(format!("{}, {}! 👋 We're currently working on: **{}**. Ready to continue?", greeting, user, title));
-                        }
-                    }
+                if lower.contains("how are you")
+                    || lower.contains("how r you")
+                    || lower.contains("how you doing")
+                    || lower.contains("how's it going")
+                    || lower.contains("hows it going")
+                    || lower.contains("what's up")
+                    || lower.contains("whats up")
+                {
+                    return Ok(format!(
+                        "Hey, {} - I'm good and locked in. What are we working on?",
+                        user
+                    ));
                 }
-                return Ok(format!("{}, {}! 👋 What are you working on?", greeting, user));
+                return Ok(format!("Hey, {} - what's up?", user));
             }
 
             // Fast-path: "what are we doing" / "what's the agenda" — check active task instantly
@@ -431,7 +479,28 @@ impl CodexEngine {
                 let _ = self.concept_store.save(&global_brain.join("concepts.json"));
             }
 
+            // Report RAG stats
+            let chunk_count = self.vector_store.len();
+            let embedded_count = self.vector_store.embedded_count();
+            if chunk_count > 0 {
+                if embedded_count > 0 {
+                    message.push_str(&format!(
+                        " RAG: {} chunks indexed, {} embedded (semantic search active).",
+                        chunk_count, embedded_count
+                    ));
+                } else {
+                    message.push_str(&format!(
+                        " RAG: {} chunks indexed (keyword search active — add Gemini key for semantic search).",
+                        chunk_count
+                    ));
+                }
+            }
+
             return Ok(message);
+        }
+
+        if trimmed == ":help" || trimmed == ":commands" {
+            return Ok(HELP_TEXT.to_string());
         }
 
         // ── Cross-Project Intelligence ─────────────────────────────
@@ -455,6 +524,20 @@ impl CodexEngine {
                 return Ok("Temporal graph not built yet. Run :index first.".to_string());
             }
             return Ok(self.temporal_graph.ownership_report());
+        }
+
+        if trimmed == ":history" {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            return Ok(self.temporal_graph.project_history_report());
+        }
+
+        if trimmed == ":hotspots" {
+            if !self.temporal_graph.enriched {
+                return Ok("Temporal graph not built yet. Run :index first.".to_string());
+            }
+            return Ok(self.temporal_graph.hotspot_report());
         }
 
         if trimmed == ":coupling" {
@@ -504,6 +587,255 @@ impl CodexEngine {
                 return self.execute_task(g);
             }
             return self.get_next_task(None);
+        }
+
+        // ── Code Review / ship-gate commands ──────────────────────────
+        if trimmed == ":review" || trimmed == ":review all" || trimmed.starts_with(":review ") {
+            // Determine scope
+            let rest = trimmed.strip_prefix(":review").unwrap_or("").trim();
+
+            if rest == "--install-gate" {
+                return Ok(self.install_review_gate());
+            }
+
+            let (files, scope_label): (Vec<String>, String) = if rest == "all" {
+                // Whole codebase: every indexed file
+                if self.index.stats().file_count == 0 {
+                    self.build_index()?;
+                }
+                let files = self
+                    .index
+                    .files()
+                    .keys()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                (files, "whole codebase".to_string())
+            } else {
+                // Default: git-changed files (what they're about to ship)
+                match &self.git {
+                    Some(git) => {
+                        let changed = git.changed_files();
+                        if changed.is_empty() {
+                            return Ok("✅ No uncommitted changes to review. Use `:review all` to scan the whole codebase.".to_string());
+                        }
+                        (changed, "changed files".to_string())
+                    }
+                    None => {
+                        // No git — review whole codebase
+                        if self.index.stats().file_count == 0 {
+                            self.build_index()?;
+                        }
+                        let files = self
+                            .index
+                            .files()
+                            .keys()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect();
+                        (files, "whole codebase (no git)".to_string())
+                    }
+                }
+            };
+
+            println!("🔍 Reviewing {} ({} file(s))... this may take a moment.\n", scope_label, files.len());
+
+            let report = crate::review::review_files(
+                &self.root,
+                &files,
+                &scope_label,
+                self.model.as_deref().map(|m| m as &(dyn CodexModel + Send + Sync)),
+            );
+
+            self.memory.add_event(
+                "review",
+                format!(
+                    "Review ({}): {} findings, verdict {:?}",
+                    scope_label,
+                    report.findings.len(),
+                    report.verdict
+                ),
+                crate::memory::MemoryEvent::IndexSnapshot {
+                    file_count: report.files_scanned,
+                    total_lines: report.findings.len(),
+                    languages: std::collections::HashMap::new(),
+                },
+            );
+
+            return Ok(report.render());
+        }
+
+        // ── Product-Manager brain commands ────────────────────────────
+        if let Some(idea) = trimmed.strip_prefix(":spec ") {
+            let idea = idea.trim();
+            if idea.is_empty() {
+                return Ok("Usage: :spec <rough idea>   e.g. :spec a login system with google oauth".to_string());
+            }
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:spec` needs an LLM.".to_string()),
+            };
+            let context = self.pm_context_snapshot();
+            let pm = crate::pm::ProductManager::new(model);
+            match pm.draft_spec(idea, &context) {
+                Ok(spec) => {
+                    self.memory.add("pm-spec", format!("Drafted spec: {}", spec.title));
+                    return Ok(spec.render());
+                }
+                Err(e) => return Ok(format!("❌ Spec drafting failed: {}", e)),
+            }
+        }
+
+        if let Some(idea) = trimmed.strip_prefix(":ask ") {
+            let idea = idea.trim();
+            if idea.is_empty() {
+                return Ok("Usage: :ask <idea>   — Astra asks the key questions to scope your idea".to_string());
+            }
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:ask` needs an LLM.".to_string()),
+            };
+            let context = self.pm_context_snapshot();
+            let pm = crate::pm::ProductManager::new(model);
+            match pm.clarifying_questions(idea, &context) {
+                Ok(qs) if !qs.is_empty() => {
+                    let mut out = format!("🤔 **Before we build \"{}\", answer these:**\n\n", idea);
+                    for (i, q) in qs.iter().enumerate() {
+                        out.push_str(&format!("{}. {}\n", i + 1, q));
+                    }
+                    out.push_str("\n_Then run `:spec <idea>` to get the full spec._");
+                    return Ok(out);
+                }
+                Ok(_) => return Ok("The idea seems clear enough — run `:spec <idea>` to draft the full spec.".to_string()),
+                Err(e) => return Ok(format!("❌ Failed: {}", e)),
+            }
+        }
+
+        if let Some(goal) = trimmed.strip_prefix(":sharpen ") {
+            let goal = goal.trim();
+            if goal.is_empty() {
+                return Ok("Usage: :sharpen <draft goal>".to_string());
+            }
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:sharpen` needs an LLM.".to_string()),
+            };
+            let context = self.pm_context_snapshot();
+            let pm = crate::pm::ProductManager::new(model);
+            match pm.sharpen_goal(goal, &context) {
+                Ok(sharp) => return Ok(format!("✨ **Sharpened**\n\n{}", sharp)),
+                Err(e) => return Ok(format!("❌ Failed: {}", e)),
+            }
+        }
+
+        // ── DevOps / Project-Manager commands ─────────────────────────
+        if trimmed == ":commit" {
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:commit` needs an LLM to draft the message.".to_string()),
+            };
+            match crate::devops::commit_all(&self.root, model) {
+                Ok(res) => {
+                    self.memory.add("devops", format!("committed: {}", res.message.lines().next().unwrap_or("")));
+                    return Ok(format!("✅ **Committed**\n\n```\n{}\n```\n\n{}", res.message, res.log.trim()));
+                }
+                Err(e) => return Ok(format!("❌ Commit failed: {}", e)),
+            }
+        }
+
+        if trimmed == ":ship" {
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:ship` needs an LLM to draft the commit.".to_string()),
+            };
+            match crate::devops::ship(&self.root, model) {
+                Ok(res) => {
+                    self.memory.add("devops", format!("shipped to {}: {}", res.branch, res.commit_message.lines().next().unwrap_or("")));
+                    let push_status = if res.pushed {
+                        format!("🚀 Pushed to `origin/{}`.", res.branch)
+                    } else {
+                        format!("⚠️  {}", res.push_log)
+                    };
+                    return Ok(format!(
+                        "✅ **Shipped**\n\n```\n{}\n```\n\n{}",
+                        res.commit_message, push_status
+                    ));
+                }
+                Err(e) => return Ok(format!("❌ Ship failed: {}", e)),
+            }
+        }
+
+        if trimmed == ":pr" || trimmed.starts_with(":pr ") {
+            let base = trimmed.strip_prefix(":pr ").map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("main");
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:pr` needs an LLM to draft the PR.".to_string()),
+            };
+            match crate::devops::open_pr(&self.root, model, base) {
+                Ok(res) => {
+                    self.memory.add("devops", format!("opened PR: {}", res.title));
+                    return Ok(format!(
+                        "✅ **Pull Request Opened**\n\n**{}**\n\n{}\n\n🔗 {}",
+                        res.title, res.body, res.url
+                    ));
+                }
+                Err(e) => return Ok(format!("❌ PR failed: {}", e)),
+            }
+        }
+
+        if let Some(tag) = trimmed.strip_prefix(":release ") {
+            let tag = tag.trim();
+            if tag.is_empty() {
+                return Ok("Usage: :release <tag>   e.g. :release v0.2.0".to_string());
+            }
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:release` needs an LLM to draft notes.".to_string()),
+            };
+            match crate::devops::cut_release(&self.root, model, tag) {
+                Ok(res) => {
+                    self.memory.add("devops", format!("cut release {}", res.tag));
+                    return Ok(format!(
+                        "🎉 **Release {} created**\n\n{}\n\n🔗 {}",
+                        res.tag, res.notes, res.url
+                    ));
+                }
+                Err(e) => return Ok(format!("❌ Release failed: {}", e)),
+            }
+        }
+
+        if trimmed == ":standup" {
+            let model = match &self.model {
+                Some(m) => m.as_ref(),
+                None => return Ok("No language model configured. `:standup` needs an LLM.".to_string()),
+            };
+            match crate::devops::standup_report(&self.root, model) {
+                Ok(report) => return Ok(format!("☕ **Astra Standup**\n\n{}", report)),
+                Err(e) => return Ok(format!("❌ Standup failed: {}", e)),
+            }
+        }
+
+        // ── Plan management commands ──────────────────────────────────
+        if trimmed == ":plan status" || trimmed == ":plan" {
+            return match crate::planner::Plan::load(&self.root) {
+                Some(plan) => {
+                    let planner_ref: Option<()> = None; // status-only, no model needed
+                    let _ = planner_ref;
+                    Ok(plan.render_dashboard())
+                }
+                None => Ok("No active plan. Use `:task <goal>` to create one.".to_string()),
+            };
+        }
+
+        if trimmed == ":plan clear" {
+            crate::planner::Plan::clear(&self.root);
+            return Ok("🗑️  Active plan cleared.".to_string());
+        }
+
+        if trimmed == ":plan resume" {
+            return match crate::planner::Plan::load(&self.root) {
+                Some(plan) if !plan.is_complete() => self.resume_plan(plan),
+                Some(_) => Ok("Plan is already complete. Use `:plan clear` and `:task <goal>` to start fresh.".to_string()),
+                None => Ok("No active plan. Use `:task <goal>` to create one.".to_string()),
+            };
         }
 
         if let Some(rest) = trimmed.strip_prefix(":plan ") {
@@ -615,6 +947,58 @@ impl CodexEngine {
             return Ok(out);
         }
 
+
+        // ── :search <query> — RAG search over indexed code ───────────
+        if let Some(rest) = trimmed.strip_prefix(":search ") {
+            let query = rest.trim();
+            if query.is_empty() {
+                return Ok("Usage: :search <query>\nExample: :search where is user authentication handled".to_string());
+            }
+            if self.vector_store.is_empty() {
+                return Ok("No chunks indexed yet. Run :index first, then search.".to_string());
+            }
+            let q_vec = self.get_query_embedding(query);
+            let results = self.vector_store.search(query, q_vec.as_deref(), 5);
+            if results.is_empty() {
+                return Ok(format!("No code chunks matched '{}'.", query));
+            }
+            let mode = if self.vector_store.embedded_count() > 0 { "semantic" } else { "keyword" };
+            let mut out = format!(
+                "🔍 **RAG Search** ({} mode) — top {} results for: \"{}\"\n\n",
+                mode,
+                results.len(),
+                query
+            );
+            for (i, chunk) in results.iter().enumerate() {
+                out.push_str(&format!(
+                    "**{}. {}** (lines {}-{})\n```{}\n{}\n```\n\n",
+                    i + 1,
+                    chunk.path.display(),
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.language,
+                    chunk.content.trim()
+                ));
+            }
+
+            // If we have a model, also synthesize an answer from the chunks
+            if let Some(model) = &self.model {
+                let context = format_chunks_for_prompt(&results, 6000);
+                let prompt = format!(
+                    "You are Astra, a codebase assistant. The user searched for: \"{}\"\n\n\
+                    Here are the most relevant code chunks from the codebase:\n\n{}\n\
+                    Based only on the code above, answer the user's question concisely. \
+                    Reference specific file paths and line numbers where relevant.",
+                    query, context
+                );
+                if let Ok(answer) = model.complete(&prompt) {
+                    out.push_str(&format!("---\n**Astra's Analysis:**\n{}\n", answer));
+                }
+            }
+
+            self.memory.add("rag-search", format!("query: {} ({} results)", query, results.len()));
+            return Ok(out);
+        }
 
         if let Some(rest) = trimmed.strip_prefix(":web ") {
             let query = rest.trim();
@@ -1518,7 +1902,42 @@ impl CodexEngine {
         let index_path = global_brain.join("index.json");
         let _ = self.index.save(&index_path);
 
+        // RAG: chunk every indexed file and build the vector store
+        self.build_vector_store();
+        let _ = self.vector_store.save(&global_brain.join("vectors.json"));
+
         Ok(())
+    }
+
+    fn build_vector_store(&mut self) {
+        let file_entries: Vec<(std::path::PathBuf, String)> = self.index.indexed_paths();
+        let mut new_store = VectorStore::new();
+
+        for (path, language) in &file_entries {
+            let content = match fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let chunks = chunk_file(path, &content, language);
+            let chunk_ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+            new_store.upsert_chunks(chunks);
+            self.index.set_chunk_ids(path, chunk_ids);
+        }
+
+        // Embed chunks if an embedding model is configured
+        if self.embedder.is_some() {
+            let chunk_ids: Vec<String> = new_store.chunks.iter().map(|c| c.id.clone()).collect();
+            let chunk_texts: Vec<String> = new_store.chunks.iter().map(|c| c.content.clone()).collect();
+            for (id, text) in chunk_ids.iter().zip(chunk_texts.iter()) {
+                if let Some(embedder) = &self.embedder {
+                    if let Ok(emb) = embedder.get_embedding(text) {
+                        new_store.set_embedding(id, emb);
+                    }
+                }
+            }
+        }
+
+        self.vector_store = new_store;
     }
 
     fn strip_markdown_fences(text: &str) -> String {
@@ -1644,6 +2063,215 @@ impl CodexEngine {
         }
     }
 
+    fn recent_conversation_context(&self, limit: usize) -> Vec<String> {
+        self.memory
+            .events_of_kind("qa")
+            .iter()
+            .rev()
+            .take(limit)
+            .rev()
+            .map(|entry| entry.content.clone())
+            .collect()
+    }
+
+    fn rank_relevant_files(&self, question: &str, limit: usize) -> Vec<PathBuf> {
+        let question_lower = question.to_ascii_lowercase();
+        let mentioned_file = self
+            .extract_file_path_from_question(question)
+            .map(|value| value.to_ascii_lowercase());
+        let query_terms = extract_query_terms(question);
+
+        let mut scored: Vec<(usize, PathBuf)> = self
+            .index
+            .files()
+            .iter()
+            .filter_map(|(path, summary)| {
+                let path_lower = path.to_string_lossy().to_ascii_lowercase();
+                let stem_lower = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let mut score = 0usize;
+
+                if let Some(file) = &mentioned_file {
+                    if path_lower.ends_with(file) || path_lower.contains(file) {
+                        score += 100;
+                    }
+                }
+
+                if !stem_lower.is_empty() && question_lower.contains(&stem_lower) {
+                    score += 12;
+                }
+
+                for term in &query_terms {
+                    if term.len() < 3 {
+                        continue;
+                    }
+                    if path_lower.contains(term) {
+                        score += 4;
+                    }
+                    if stem_lower == *term {
+                        score += 8;
+                    }
+                    if summary
+                        .symbols
+                        .iter()
+                        .any(|symbol| symbol.name.eq_ignore_ascii_case(term))
+                    {
+                        score += 12;
+                    } else if summary.symbols.iter().any(|symbol| {
+                        symbol.name.to_ascii_lowercase().contains(term)
+                    }) {
+                        score += 5;
+                    }
+                }
+
+                if score > 0 {
+                    Some((score, path.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, path)| path)
+            .collect()
+    }
+
+    fn collect_relevant_file_hints(&self, question: &str, limit: usize) -> Vec<String> {
+        self.rank_relevant_files(question, limit)
+            .into_iter()
+            .filter_map(|path| {
+                self.index.files().get(&path).map(|summary| {
+                    let examples = summary
+                        .symbols
+                        .iter()
+                        .take(4)
+                        .map(|symbol| symbol.name.clone())
+                        .collect::<Vec<_>>();
+                    let example_text = if examples.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" | symbols: {}", examples.join(", "))
+                    };
+                    format!(
+                        "{} [{}] {} lines, {} functions{}",
+                        path.display(),
+                        summary.language,
+                        summary.line_count,
+                        summary.approx_fn_count,
+                        example_text
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn collect_relevant_memories(
+        &self,
+        question: &str,
+        query_embedding: Option<&[f32]>,
+    ) -> Vec<MemoryEntry> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+
+        for entry in self
+            .memory
+            .search(question, query_embedding, 8)
+            .into_iter()
+            .filter(|entry| include_memory_entry_in_answer(entry, question))
+        {
+            let key = format!("{}::{}", entry.kind, entry.content);
+            if seen.insert(key) {
+                out.push(entry);
+            }
+            if out.len() >= 6 {
+                break;
+            }
+        }
+
+        let lower = question.to_ascii_lowercase();
+        if out.len() < 6
+            && (lower.contains("readme")
+                || lower.contains("vision")
+                || lower.contains("roadmap")
+                || lower.contains("docs")
+                || lower.contains("product"))
+        {
+            for doc in self.memory.events_of_kind("source-doc").iter().rev().take(2) {
+                let mut cloned = (*doc).clone();
+                if cloned.content.len() > 900 {
+                    cloned.content.truncate(900);
+                    cloned.content.push_str("\n... [Truncated]");
+                }
+                let key = format!("{}::{}", cloned.kind, cloned.content);
+                if seen.insert(key) {
+                    out.push(cloned);
+                }
+            }
+        }
+
+        out
+    }
+
+    fn collect_relevant_chunks(
+        &self,
+        question: &str,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Vec<crate::rag::Chunk> {
+        let mut selected = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        for chunk in self.vector_store.search(question, query_embedding, limit) {
+            if seen_ids.insert(chunk.id.clone()) {
+                selected.push(chunk.clone());
+            }
+        }
+
+        let mentioned_file = self
+            .extract_file_path_from_question(question)
+            .map(|value| value.to_ascii_lowercase());
+        if let Some(file) = mentioned_file {
+            for chunk in self
+                .vector_store
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    let path_lower = chunk.path.to_string_lossy().to_ascii_lowercase();
+                    path_lower.ends_with(&file) || path_lower.contains(&file)
+                })
+                .take(2)
+            {
+                if seen_ids.insert(chunk.id.clone()) {
+                    selected.insert(0, chunk.clone());
+                }
+            }
+        }
+
+        for path in self.rank_relevant_files(question, 3) {
+            for chunk in self
+                .vector_store
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.path == path)
+                .take(2)
+            {
+                if seen_ids.insert(chunk.id.clone()) {
+                    selected.push(chunk.clone());
+                }
+            }
+        }
+
+        selected.truncate(limit);
+        selected
+    }
+
     fn answer_question(&mut self, question: &str) -> Result<String> {
         if is_name_question(question) {
             if let Some(name) = self.memory.user_name() {
@@ -1736,13 +2364,7 @@ impl CodexEngine {
             let stats = self.index.stats();
             let by_lang = self.index.files_by_language();
             let q_vec = self.get_query_embedding(question);
-            let mut matches = self
-                .memory
-                .search(question, q_vec.as_deref(), 6)
-                .into_iter()
-                .filter(|entry| include_memory_entry_in_answer(entry, question))
-                .take(3)
-                .collect::<Vec<_>>();
+            let mut matches = self.collect_relevant_memories(question, q_vec.as_deref());
             let recent = self.memory.recent(3);
 
             if stats.file_count == 0 {
@@ -1758,6 +2380,7 @@ impl CodexEngine {
                      Rules:\n\
                      - Answer the user's question directly.\n\
                      - No sarcasm, no catchphrases, no personality filler.\n\
+                     - If the user asks for a repo feature in normal conversation, answer naturally, but do not invent missing project facts.\n\
                      - If the question requires project context, say to run :index.\n\
                      - Never mention README/framework/tooling unless explicitly provided in this question.\n\n\
                      User question: {}",
@@ -1768,6 +2391,69 @@ impl CodexEngine {
                     .add("qa", format!("Q: {}\nA: {}", question, answer));
                 return Ok(answer);
             }
+
+            let recent_qa = self.recent_conversation_context(3);
+            let relevant_files = self.collect_relevant_file_hints(question, 4);
+            let social_question = is_social_message(question);
+            let architecture_context = if !social_question
+                && (is_architecture_question(question) || is_project_context_question(question))
+            {
+                self.architecture_context_summary(question)
+            } else {
+                None
+            };
+            let team_context = if !social_question && is_team_question(question) {
+                self.team_context_summary()
+            } else {
+                None
+            };
+            let conversation_feature_request = !social_question
+                && (
+                    is_architecture_question(question)
+                        || is_team_question(question)
+                        || lower_question.contains("history")
+                        || lower_question.contains("hotspot")
+                        || lower_question.contains("who owns")
+                        || lower_question.contains("onboard")
+                        || lower_question.contains("where should i start")
+                        || lower_question.contains("summary")
+                        || lower_question.contains("what changed")
+                );
+            let include_recent_qa = !social_question
+                && (
+                    lower_question.contains("continue")
+                        || lower_question.contains("resume")
+                        || lower_question.contains("again")
+                        || lower_question.contains("earlier")
+                        || lower_question.contains("before")
+                        || lower_question.contains("previous")
+                        || lower_question.contains("last time")
+                        || lower_question.contains("we were")
+                        || lower_question.contains("we are")
+                );
+            let include_profile_report = is_name_question(question) || is_personal_question(question);
+            let include_project_report = !social_question
+                && (
+                    lower_question.contains("project memory")
+                        || lower_question.contains("what do you know about this project")
+                        || lower_question.contains("remember about this project")
+                        || lower_question.contains("codebase")
+                        || lower_question.contains("architecture")
+                        || lower_question.contains("ownership")
+                        || lower_question.contains("team")
+                        || lower_question.contains("history")
+                );
+            let include_memory_matches = !social_question
+                && !matches.is_empty()
+                && (
+                    lower_question.contains("remember")
+                        || lower_question.contains("memory")
+                        || lower_question.contains("before")
+                        || lower_question.contains("previous")
+                        || lower_question.contains("history")
+                        || lower_question.contains("context")
+                        || is_project_context_question(question)
+                );
 
             if !self.concept_store.concepts.is_empty() {
                 let mut concepts = self.concept_store.concepts.clone();
@@ -1849,20 +2535,6 @@ impl CodexEngine {
                 }
             }
 
-            if stats.file_count > 0 {
-                let docs = self.memory.events_of_kind("source-doc");
-                for doc in docs.iter().rev().take(1) {
-                    if !matches.iter().any(|m| m.content == doc.content) {
-                        let mut doc_clone = (*doc).clone();
-                        if doc_clone.content.len() > 800 {
-                            doc_clone.content.truncate(800);
-                            doc_clone.content.push_str("\n... [Truncated]");
-                        }
-                        matches.push(doc_clone);
-                    }
-                }
-            }
-            
             // --- Add Git history context only if directly relevant ---
             if question.to_lowercase().contains("commit") || question.to_lowercase().contains("history") {
                 let git_events = self.memory.events_of_kind("git-commit");
@@ -1873,80 +2545,104 @@ impl CodexEngine {
 
             // --- Autonomous Tool Interception (Semantic Enrichment) ---
             let semantic_context = self.try_semantic_enrichment(question);
-            matches.extend(semantic_context);
+            for entry in semantic_context {
+                if !matches
+                    .iter()
+                    .any(|existing| existing.kind == entry.kind && existing.content == entry.content)
+                {
+                    matches.push(entry);
+                }
+            }
 
-            let mut prompt = String::new();
-            let _ = writeln!(&mut prompt, "{}", self.persona.system_prompt());
+            // --- RAG: inject relevant code chunks ---
+            let relevant_chunks = if !self.vector_store.is_empty() {
+                self.collect_relevant_chunks(question, q_vec.as_deref(), 6)
+            } else {
+                Vec::new()
+            };
+            let weak_grounding = !social_question
+                && is_project_context_question(question)
+                && matches.is_empty()
+                && relevant_chunks.is_empty()
+                && architecture_context.is_none()
+                && team_context.is_none();
+            let rag_context = if relevant_chunks.is_empty() {
+                None
+            } else {
+                let refs = relevant_chunks.iter().collect::<Vec<_>>();
+                Some(format_chunks_for_prompt(&refs, 5000))
+            };
+
+            let mut system_prompt = String::new();
+            let _ = writeln!(&mut system_prompt, "{}", self.persona.system_prompt());
             let _ = writeln!(
-                &mut prompt,
-                "\nYou are Astra, a local codebase assistant. Project root: {:?}.",
-                self.root
+                &mut system_prompt,
+                "You are Astra, a grounded local codebase companion and pair engineer."
             );
-            
-            let current_time = chrono::Local::now();
-            let _ = writeln!(&mut prompt, "The current local time is: {}", current_time.format("%Y-%m-%d %H:%M:%S").to_string());
+            let _ = writeln!(
+                &mut system_prompt,
+                "Answer naturally and intelligently, but never pretend you saw code, ran commands, or know facts that are not in the provided context."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "Prefer retrieved code and verified memory over generic advice."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "When you infer rather than know, say so plainly."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "If code evidence is provided, cite the file paths and line ranges from that evidence when it helps."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "In chat mode you cannot run commands or edit files, so never claim that you already did."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "If the user asks you to implement or change code, explain the next step and say you can start."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "For repo-specific questions, use only grounded evidence from the provided context sections. Never fill missing repo details with generic guesses."
+            );
+            let _ = writeln!(
+                &mut system_prompt,
+                "If the user asks for something that exists as a CLI feature in normal conversation, answer directly from the grounded context instead of redirecting them to a command unless the data is missing."
+            );
 
-            // --- Inject active task so the LLM knows what we're working on ---
-            let task_path = self.root.join(".astra").join("active_task.json");
-            if let Ok(task_content) = std::fs::read_to_string(&task_path) {
-                if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
-                    let title = task.get("title").and_then(|t| t.as_str()).unwrap_or("unknown");
-                    let phase = task.get("phase").and_then(|t| t.as_str()).unwrap_or("unknown");
-                    let _ = writeln!(&mut prompt, "\n### ACTIVE TASK (GROUND TRUTH — DO NOT HALLUCINATE DIFFERENT TASKS):");
-                    let _ = writeln!(&mut prompt, "The user is currently working on: {}", title);
-                    let _ = writeln!(&mut prompt, "Task phase: {}", phase);
-                    let _ = writeln!(&mut prompt, "If the user asks about their current task, agenda, or what they were doing, refer to THIS task. Do NOT invent other tasks.");
-                }
-            }
-            
-            let recent_qa = self.memory.events_of_kind("qa");
-            if !recent_qa.is_empty() {
-                let _ = writeln!(&mut prompt, "\n### RECENT CONVERSATION HISTORY:");
-                let _ = writeln!(&mut prompt, "Use this to recall what was just discussed.");
-                for entry in recent_qa.iter().rev().take(4).rev() { // oldest to newest of the last 4
-                    let _ = writeln!(&mut prompt, "{}", entry.content);
-                }
-            }
-            
-            let profile_report = self.memory.profile_report();
-            if profile_report != "No user profile facts stored yet." {
-                let _ = writeln!(&mut prompt, "\n### USER PROFILE (GROUND TRUTH):");
-                let _ = writeln!(&mut prompt, "{}", profile_report);
-            }
-            let project_report = self.memory.project_report();
-            if project_report != "No project memory facts stored yet." {
-                let _ = writeln!(&mut prompt, "\n### PROJECT MEMORY:");
-                let _ = writeln!(&mut prompt, "{}", project_report);
-            }
-            
-            // Inject Memory context for "Proactive Triggering"
-            if !matches.is_empty() {
-                let _ = writeln!(&mut prompt, "\n### MEMORY BANK (USE THESE FACTS TO ANSWER - DO NOT IGNORE):");
-                let _ = writeln!(&mut prompt, "The following are facts you have learned about the user and their project.");
-                let _ = writeln!(&mut prompt, "If the user asks about ANY of these facts, you MUST use them in your answer.");
-                let _ = writeln!(&mut prompt, "Do NOT say 'I don't have that information' if it appears below.");
-                for entry in matches {
-                    let _ = writeln!(&mut prompt, "- [{}] {}", entry.kind, entry.content);
-                }
-            }
-            
-            let _ = writeln!(&mut prompt, "\n### Project Stats:");
-            let _ = writeln!(&mut prompt, "- Root: {:?}", self.root);
-            let _ = writeln!(&mut prompt, "- Indexed: {} files, {} lines.", stats.file_count, stats.total_lines);
+            let mut user_prompt = String::new();
+            let _ = writeln!(&mut user_prompt, "### USER QUESTION");
+            let _ = writeln!(&mut user_prompt, "{}", question);
+            let _ = writeln!(&mut user_prompt);
+            let _ = writeln!(&mut user_prompt, "### VERIFIED PROJECT CONTEXT");
+            let _ = writeln!(&mut user_prompt, "- Root: {:?}", self.root);
+            let _ = writeln!(
+                &mut user_prompt,
+                "- Indexed: {} files, {} lines.",
+                stats.file_count,
+                stats.total_lines
+            );
 
-            // --- Inject top-level directory listing so the LLM knows what folders exist ---
             if let Ok(entries) = std::fs::read_dir(&self.root) {
                 let mut dirs: Vec<String> = Vec::new();
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') || name == "node_modules" || name == "target" { continue; }
+                    if name.starts_with('.') || name == "node_modules" || name == "target" {
+                        continue;
+                    }
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         dirs.push(name);
                     }
                 }
                 dirs.sort();
                 if !dirs.is_empty() {
-                    let _ = writeln!(&mut prompt, "- Top-level directories: {}", dirs.join(", "));
+                    let _ = writeln!(
+                        &mut user_prompt,
+                        "- Top-level directories: {}",
+                        dirs.join(", ")
+                    );
                 }
             }
             if !by_lang.is_empty() {
@@ -1958,7 +2654,22 @@ impl CodexEngine {
                     .map(|(lang, count)| format!("{}={}", lang, count))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(&mut prompt, "- Top languages: {}", top_str);
+                let _ = writeln!(&mut user_prompt, "- Top languages: {}", top_str);
+            }
+
+            let task_path = self.root.join(".astra").join("active_task.json");
+            if let Ok(task_content) = std::fs::read_to_string(&task_path) {
+                if let Ok(task) = serde_json::from_str::<serde_json::Value>(&task_content) {
+                    let title = task
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("unknown");
+                    let phase = task
+                        .get("phase")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("unknown");
+                    let _ = writeln!(&mut user_prompt, "- Active task: {} ({})", title, phase);
+                }
             }
             if !recent.is_empty() {
                 let recent_kinds = recent
@@ -1966,65 +2677,136 @@ impl CodexEngine {
                     .map(|e| e.kind.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(&mut prompt, "- Recent memory kinds: {}", recent_kinds);
+                let _ = writeln!(&mut user_prompt, "- Recent memory kinds: {}", recent_kinds);
             }
-            let _ = writeln!(&mut prompt, "- Never reference README/framework details unless explicitly confirmed by indexed files or current tool output.");
-            let _ = writeln!(&mut prompt, "- Do not infer active tasks unless the user explicitly mentions a task in this conversation turn or a verified active task record is provided.");
-            let _ = writeln!(&mut prompt, "\n### CRITICAL RULES:");
-            let _ = writeln!(&mut prompt, "- You are in CHAT MODE. You CANNOT run shell commands, list directories, read files, or execute code.");
-            let _ = writeln!(&mut prompt, "- NEVER output fake commands like ':run_tool_code', 'ls', 'cat', etc. and pretend they are running. You DO NOT have that ability in chat mode.");
-            let _ = writeln!(&mut prompt, "- If the user wants you to actually DO work (read files, write code, run commands), ask them if you should 'go ahead and start' or suggest they use ':task <goal>' which activates your autonomous agent mode.");
-            let _ = writeln!(&mut prompt, "- NEVER lie about having run a command. If you haven't seen the output, say so honestly.");
 
-            // --- Autonomous Tool Calling: inject installed workflows ---
-            let wf_manager = WorkflowManager::new(&self.root);
-            let installed_tools = wf_manager.list_workflows_with_metadata().unwrap_or_default();
-            if !installed_tools.is_empty() {
-                let _ = writeln!(&mut prompt, "\n### YOUR INSTALLED TOOLS (you can trigger these):");
-                for (tool_name, description) in &installed_tools {
-                    let _ = writeln!(&mut prompt, "- {}: {}", tool_name, description);
+            if include_recent_qa && !recent_qa.is_empty() {
+                let _ = writeln!(&mut user_prompt, "\n### RECENT CONVERSATION");
+                for entry in recent_qa {
+                    let _ = writeln!(&mut user_prompt, "{}", entry);
                 }
-                let _ = writeln!(&mut prompt, "\nIMPORTANT RULES FOR TOOL USE:");
-                let _ = writeln!(&mut prompt, "- ONLY use a workflow tool if the user's request DIRECTLY MATCHES the tool's description above.");
-                let _ = writeln!(&mut prompt, "- If a tool matches and required args are present, return ONLY `:workflow run <tool_name> [args...]`.");
-                let _ = writeln!(&mut prompt, "- If required args are missing, do NOT guess; ask a concise follow-up question instead.");
-                let _ = writeln!(&mut prompt, "- For general code understanding, architecture, or questions, do NOT use workflow commands. Reply normally using indexed context.");
             }
-            let _ = writeln!(&mut prompt, "\n### ACTIONS YOU CAN TAKE:");
-            let _ = writeln!(&mut prompt, "- To migrate code: return exactly `:migrate <source_dir> <from_lang> <to_lang> <output_dir> [--ai]` (e.g. `:migrate core/src rs py out --ai`)");
-            let _ = writeln!(&mut prompt, "- To automate something new: return exactly `:workflow generate <description>`");
-            let _ = writeln!(&mut prompt, "- Reasoning protocol: infer intent, check grounding, and choose either command execution or conversational response.");
-            let _ = writeln!(&mut prompt, "- For coding tasks: provide concise implementation reasoning, verify assumptions against project context, and avoid invented APIs or file paths.");
-            let _ = writeln!(&mut prompt, "- If the user explicitly asks to execute an action and arguments are sufficient, output ONLY the command starting with `:`.");
-            
-            let _ = writeln!(&mut prompt, "\n### EXAMPLES OF CORRECT BEHAVIOR:");
-            let _ = writeln!(&mut prompt, "User: \"Can you run the build script?\"");
-            let _ = writeln!(&mut prompt, "Astra: :workflow run build_script");
-            let _ = writeln!(&mut prompt, "");
-            let _ = writeln!(&mut prompt, "User: \"Why did the rust tests fail?\"");
-            let _ = writeln!(&mut prompt, "Astra: It looks like there is a syntax error in your tests. You need to add a semicolon on line 42.");
-            let _ = writeln!(&mut prompt, "");
-            let _ = writeln!(&mut prompt, "User: \"Automate setting up a python project.\"");
-            let _ = writeln!(&mut prompt, "Astra: :workflow generate Automate setting up a Python project");
-            let _ = writeln!(&mut prompt, "");
-            let _ = writeln!(&mut prompt, "User: \"Migrate the core folder to rust.\"");
-            let _ = writeln!(&mut prompt, "Astra: :migrate core rs out --ai");
-            let _ = writeln!(&mut prompt, "\nUser question/task: {}", question);
+
+            if !relevant_files.is_empty() {
+                let _ = writeln!(&mut user_prompt, "\n### LIKELY RELEVANT FILES");
+                for hint in relevant_files {
+                    let _ = writeln!(&mut user_prompt, "- {}", hint);
+                }
+            }
+
+            if let Some(architecture_context) = &architecture_context {
+                let _ = writeln!(&mut user_prompt, "\n### ARCHITECTURE SNAPSHOT");
+                let _ = writeln!(&mut user_prompt, "{}", architecture_context);
+            }
+
+            if let Some(team_context) = &team_context {
+                let _ = writeln!(&mut user_prompt, "\n### TEAM CONTEXT");
+                let _ = writeln!(&mut user_prompt, "{}", team_context);
+            }
+
+            if conversation_feature_request {
+                let _ = writeln!(&mut user_prompt, "\n### CONVERSATION MODE");
+                let _ = writeln!(
+                    &mut user_prompt,
+                    "The user is asking for companion features in normal conversation. Answer normally using the grounded context below instead of referring them to a command unless required data is missing."
+                );
+            }
+
+            if weak_grounding {
+                let _ = writeln!(&mut user_prompt, "\n### GROUNDING WARNING");
+                let _ = writeln!(
+                    &mut user_prompt,
+                    "Grounded evidence for this specific repo question is thin. Do not guess missing project facts. Say what is confirmed, then call out what is still unknown."
+                );
+            }
+
+            let profile_report = self.memory.profile_report();
+            if include_profile_report && profile_report != "No user profile facts stored yet." {
+                let _ = writeln!(&mut user_prompt, "\n### USER PROFILE");
+                let _ = writeln!(&mut user_prompt, "{}", profile_report);
+            }
+            let project_report = self.memory.project_report();
+            if include_project_report && project_report != "No project memory facts stored yet." {
+                let _ = writeln!(&mut user_prompt, "\n### PROJECT MEMORY");
+                let _ = writeln!(&mut user_prompt, "{}", project_report);
+            }
+
+            if include_memory_matches {
+                let _ = writeln!(&mut user_prompt, "\n### RELEVANT MEMORY");
+                for entry in &matches {
+                    let _ = writeln!(&mut user_prompt, "- [{}] {}", entry.kind, entry.content);
+                }
+            }
+
+            if let Some(ref rag) = rag_context {
+                let _ = writeln!(
+                    &mut user_prompt,
+                    "\n### RELEVANT CODE (GROUND TRUTH FROM THE CODEBASE)"
+                );
+                let _ = writeln!(&mut user_prompt, "{}", rag);
+            }
+
+            let _ = writeln!(&mut user_prompt, "\n### RESPONSE INSTRUCTIONS");
+            let _ = writeln!(
+                &mut user_prompt,
+                "- Start with the direct answer, not a preamble."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- For casual chat, reply like a real teammate in 1-2 natural sentences."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- Do not mention dates, timestamps, stored memory, or old conversation history unless the user asks for them."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- Use the retrieved code and memory when relevant."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- Use architecture and team context when it directly helps answer the question."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- If this is a normal-conversation version of a repo feature, answer it directly instead of telling the user to run a command."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- If the context is incomplete, say what is missing instead of guessing."
+            );
+            let _ = writeln!(
+                &mut user_prompt,
+                "- If the user is asking for implementation work, explain the best next step and mention that you can start."
+            );
 
             println!(" 💭 Thinking...");
-            let answer = model.complete(&prompt)?;
+            let answer = model.complete_chat(&system_prompt, &user_prompt)?;
 
             // --- Autonomous Interception: scan lines for command ---
-            for line in answer.lines() {
-                let text = line.trim().trim_matches('`');
-                if text.starts_with(":workflow run ")
-                    || text.starts_with(":workflow generate ")
-                    || text.starts_with(":workflow list")
-                    || text.starts_with(":migrate ")
-                    || text.starts_with(":task ")
-                {
-                    self.memory.add("autonomous-action", format!("Astra autonomously triggered: {}", text));
-                    return self.handle_input(text);
+            let explicit_execution_request = {
+                let lower_question = question.to_ascii_lowercase();
+                lower_question.contains("run ")
+                    || lower_question.contains("start ")
+                    || lower_question.contains("build ")
+                    || lower_question.contains("implement ")
+                    || lower_question.contains("fix ")
+                    || lower_question.contains("migrate ")
+                    || lower_question.contains("automate ")
+            };
+            if explicit_execution_request {
+                for line in answer.lines() {
+                    let text = line.trim().trim_matches('`');
+                    if text.starts_with(":workflow run ")
+                        || text.starts_with(":workflow generate ")
+                        || text.starts_with(":workflow list")
+                        || text.starts_with(":migrate ")
+                        || text.starts_with(":task ")
+                    {
+                        self.memory
+                            .add("autonomous-action", format!("Astra autonomously triggered: {}", text));
+                        return self.handle_input(text);
+                    }
                 }
             }
 
@@ -2041,11 +2823,14 @@ impl CodexEngine {
                     println!("\n ◈ Astra ❯ Searching the web to find the answer... ⏳");
                     if let Ok(results) = search.search(question) {
                         self.memory.add("web-search", format!("Auto-search for: {}\n{}", question, &results[..results.len().min(2000)]));
-                        let augmented_prompt = format!(
-                            "{}\n\nI also found these web search results that may help:\n{}\n\nNow answer the user's question using ALL available context: {}",
-                            prompt, &results[..results.len().min(3000)], question
+                        let augmented_user_prompt = format!(
+                            "{}\n\n### WEB RESULTS\n{}\n\nUse these only if they actually help answer the question better.",
+                            user_prompt,
+                            &results[..results.len().min(3000)]
                         );
-                        if let Ok(better_answer) = model.complete(&augmented_prompt) {
+                        if let Ok(better_answer) =
+                            model.complete_chat(&system_prompt, &augmented_user_prompt)
+                        {
                             self.memory.add("web-knowledge", format!("Q: {}\nA: {}", question, better_answer));
                             self.memory.add("qa", format!("Q: {}\nA: {}", question, better_answer));
                             return Ok(format!("{}\n\n_🌐 Answer augmented with web search results._", better_answer));
@@ -2069,9 +2854,8 @@ impl CodexEngine {
     }
 
     fn intent_for(&self, trimmed: &str) -> Option<String> {
-        let lower = trimmed.to_lowercase();
         // Greetings/social should NOT be intercepted by intent rules.
-        if lower == "hey astra" || lower == "hello astra" || lower == "astra" || lower == "hey" || lower == "hi" {
+        if is_social_message(trimmed) {
             return None;
         }
 
@@ -2142,6 +2926,17 @@ impl CodexEngine {
             || lower.contains("summarize the project")
         {
             return Some(":summary".to_string());
+        }
+
+        if lower.contains("project history")
+            || lower.contains("full history")
+            || lower.contains("history of this project")
+            || lower.contains("history of the project")
+            || lower.contains("how did this project evolve")
+            || lower.contains("how has this project changed")
+            || lower.contains("project evolution")
+        {
+            return Some(":history".to_string());
         }
 
         if lower == "astra team status"
@@ -2253,6 +3048,15 @@ impl CodexEngine {
             && self.temporal_graph.enriched
         {
             return Some(":analyze".to_string());
+        }
+
+        if lower.contains("hotspots")
+            || lower.contains("most changed files")
+            || lower.contains("change hotspots")
+            || lower.contains("churn hotspots")
+            || lower.contains("hot files")
+        {
+            return Some(":hotspots".to_string());
         }
 
         if lower.contains("semantic concepts")
@@ -2412,6 +3216,209 @@ impl CodexEngine {
             let _ = writeln!(&mut out, "⏱️ Active session: {}", active.task_id);
         }
         Ok(out)
+    }
+
+    fn team_context_summary(&self) -> Option<String> {
+        let team_mgr = TeamManager::new(&self.root);
+        let state = team_mgr.load_state().ok()?;
+        if state.team_name.is_empty() {
+            return Some("No team state is initialized for this repository yet.".to_string());
+        }
+
+        let user = load_global_config()
+            .user
+            .unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local_dev".to_string()));
+        let normalize = |v: &str| v.trim().trim_start_matches('@').to_ascii_lowercase();
+        let user_norm = normalize(&user);
+        let is_member = state.members.keys().any(|name| normalize(name) == user_norm);
+        let active_sessions = state.sessions.iter().filter(|session| session.end_time.is_none()).collect::<Vec<_>>();
+        let pending = state.tasks.values().filter(|task| task.status == crate::teams::TaskStatus::Pending).count();
+        let in_progress = state.tasks.values().filter(|task| task.status == crate::teams::TaskStatus::InProgress).count();
+        let done = state.tasks.values().filter(|task| task.status == crate::teams::TaskStatus::Done).count();
+
+        let mut out = String::new();
+        let _ = writeln!(
+            &mut out,
+            "Team: {} | members={} | tasks: pending={}, in_progress={}, done={} | active_sessions={}",
+            state.team_name,
+            state.members.len(),
+            pending,
+            in_progress,
+            done,
+            active_sessions.len()
+        );
+        let _ = writeln!(&mut out, "Current user: {} | member={}", user, is_member);
+
+        let mut members = state.members.values().collect::<Vec<_>>();
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        if !members.is_empty() {
+            let preview = members
+                .iter()
+                .take(5)
+                .map(|member| format!("{} ({:?})", member.name, member.role))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(&mut out, "Members: {}", preview);
+        }
+
+        let my_open = state
+            .tasks
+            .values()
+            .filter(|task| normalize(&task.assignee) == user_norm)
+            .filter(|task| task.status != crate::teams::TaskStatus::Done)
+            .collect::<Vec<_>>();
+        if !my_open.is_empty() {
+            let _ = writeln!(&mut out, "My open tasks:");
+            for task in my_open.iter().take(5) {
+                let _ = writeln!(&mut out, "- [{}] {} ({:?})", task.id, task.description, task.status);
+            }
+        }
+
+        if !active_sessions.is_empty() {
+            let _ = writeln!(&mut out, "Active sessions:");
+            for session in active_sessions.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- {} on {} (files_touched={}, prompts={})",
+                    session.developer,
+                    session.task_id,
+                    session.files_touched.len(),
+                    session.prompts_asked.len()
+                );
+            }
+        }
+
+        Some(out.trim_end().to_string())
+    }
+
+    fn architecture_context_summary(&self, question: &str) -> Option<String> {
+        let stats = self.index.stats();
+        if stats.file_count == 0 {
+            return None;
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(
+            &mut out,
+            "Indexed files: {} | total lines: {}",
+            stats.file_count,
+            stats.total_lines
+        );
+
+        let by_lang = self.index.files_by_language();
+        if !by_lang.is_empty() {
+            let mut top = by_lang.into_iter().collect::<Vec<_>>();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            let top_str = top
+                .into_iter()
+                .take(5)
+                .map(|(lang, count)| format!("{}={}", lang, count))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(&mut out, "Top languages: {}", top_str);
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            let mut dirs = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') || name == "node_modules" || name == "target" {
+                        return None;
+                    }
+                    entry.file_type()
+                        .ok()
+                        .filter(|file_type| file_type.is_dir())
+                        .map(|_| name)
+                })
+                .collect::<Vec<_>>();
+            dirs.sort();
+            if !dirs.is_empty() {
+                let _ = writeln!(&mut out, "Top-level directories: {}", dirs.join(", "));
+            }
+        }
+
+        let ranked_files = self.rank_relevant_files(question, 4);
+        if !ranked_files.is_empty() {
+            let _ = writeln!(&mut out, "Relevant files:");
+            for path in &ranked_files {
+                let path_str = path.to_string_lossy();
+                if let Some(summary) = self.index.files().get(path) {
+                    let _ = writeln!(
+                        &mut out,
+                        "- {} [{}] lines={} functions={}",
+                        path_str,
+                        summary.language,
+                        summary.line_count,
+                        summary.approx_fn_count
+                    );
+                } else {
+                    let _ = writeln!(&mut out, "- {}", path_str);
+                }
+            }
+        }
+
+        if self.temporal_graph.enriched {
+            let mut ownership_lines = Vec::new();
+            for path in &ranked_files {
+                let key = path.to_string_lossy().to_string();
+                if let Some(history) = self.temporal_graph.file_histories.get(&key) {
+                    ownership_lines.push(format!(
+                        "{} -> owner={} commits={} stale={}d",
+                        history.path,
+                        history.primary_owner.as_deref().unwrap_or("unknown"),
+                        history.total_changes,
+                        history.staleness_days
+                    ));
+                }
+            }
+
+            if ownership_lines.is_empty() {
+                let mut hotspots = self
+                    .temporal_graph
+                    .file_histories
+                    .values()
+                    .collect::<Vec<_>>();
+                hotspots.sort_by(|a, b| b.total_changes.cmp(&a.total_changes));
+                for history in hotspots.into_iter().take(3) {
+                    ownership_lines.push(format!(
+                        "{} -> owner={} commits={} stale={}d",
+                        history.path,
+                        history.primary_owner.as_deref().unwrap_or("unknown"),
+                        history.total_changes,
+                        history.staleness_days
+                    ));
+                }
+            }
+
+            if !ownership_lines.is_empty() {
+                let _ = writeln!(&mut out, "Ownership / hotspots:");
+                for line in ownership_lines {
+                    let _ = writeln!(&mut out, "- {}", line);
+                }
+            }
+
+            if (question.to_ascii_lowercase().contains("coupling")
+                || question.to_ascii_lowercase().contains("architecture")
+                || question.to_ascii_lowercase().contains("dependency")
+                || question.to_ascii_lowercase().contains("dependencies"))
+                && !self.temporal_graph.co_changes.is_empty()
+            {
+                let _ = writeln!(&mut out, "Notable co-change pairs:");
+                for pair in self.temporal_graph.co_changes.iter().take(3) {
+                    let _ = writeln!(
+                        &mut out,
+                        "- {} <-> {} (co_changes={}, coupling={:.2})",
+                        pair.file_a,
+                        pair.file_b,
+                        pair.co_change_count,
+                        pair.coupling_score
+                    );
+                }
+            }
+        }
+
+        Some(out.trim_end().to_string())
     }
 
     fn render_onboarding(&self) -> String {
@@ -2852,11 +3859,230 @@ impl CodexEngine {
 
     fn execute_task(&mut self, goal: &str) -> Result<String> {
         if goal.trim().is_empty() {
+            // No goal — show existing plan or ask for one
+            if let Some(plan) = crate::planner::Plan::load(&self.root) {
+                if !plan.is_complete() {
+                    return self.resume_plan(plan);
+                }
+            }
             return self.get_next_task(None);
         }
+
+        let model_available = self.model.is_some();
+        if !model_available {
+            return self.get_next_task(Some(goal));
+        }
+
+        // Check if there's already an active plan for this goal
+        if let Some(existing) = crate::planner::Plan::load(&self.root) {
+            if existing.goal.trim().eq_ignore_ascii_case(goal.trim()) && !existing.is_complete() {
+                println!("\n📋 Resuming existing plan for: {}", goal);
+                return self.resume_plan(existing);
+            }
+        }
+
+        // Fresh start: decompose goal → plan → execute
+        self.run_planned_task(goal)
+    }
+
+    /// Decompose a goal into a plan and execute it subtask by subtask.
+    fn run_planned_task(&mut self, goal: &str) -> Result<String> {
+        use crate::planner::{Planner, build_context_snapshot};
+
+        let model = match &self.model {
+            Some(m) => m.as_ref() as *const dyn CodexModel,
+            None => return Ok("No language model configured. Cannot plan.".to_string()),
+        };
+        // SAFETY: we hold &mut self and only use model for LLM calls; no aliasing.
+        let model = unsafe { &*model };
+
+        // Build context snapshot for the planner
+        let stats = self.index.stats();
+        let by_lang: Vec<(String, usize)> = {
+            let mut v: Vec<_> = self.index.files_by_language().into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v
+        };
+        let memory_facts: Vec<String> = self.memory.recent(6)
+            .iter()
+            .map(|e| format!("[{}] {}", e.kind, &e.content[..e.content.len().min(120)]))
+            .collect();
+        let context = build_context_snapshot(
+            &self.root,
+            stats.file_count,
+            stats.total_lines,
+            &by_lang,
+            &memory_facts,
+        );
+
+        println!("\n🧠 Astra is decomposing your goal into a plan...");
+        println!("   (drafting → self-critiquing → refining)\n");
+        let planner = Planner::new(model, &self.root);
+
+        let plan = match planner.decompose_deep(goal, &context) {
+            Ok(p) => p,
+            Err(e) => {
+                // Decomposition failed — fall back to single-shot agent
+                eprintln!("⚠️  Planning failed ({}), falling back to direct execution.", e);
+                return self.run_agent_for_goal(goal);
+            }
+        };
+
+        plan.save(&self.root)?;
+        println!("{}", plan.render_dashboard());
+
+        self.resume_plan(plan)
+    }
+
+    /// Execute pending subtasks one by one, reflecting after each.
+    fn resume_plan(&mut self, mut plan: crate::planner::Plan) -> Result<String> {
+        use crate::planner::{Planner, SubtaskStatus};
+
+        let model_ptr = match &self.model {
+            Some(m) => m.as_ref() as *const dyn CodexModel,
+            None => return Ok("No language model configured.".to_string()),
+        };
+        let model = unsafe { &*model_ptr };
+        let planner = Planner::new(model, &self.root);
+
+        let mut output = String::new();
+
+        loop {
+            // Find the next pending task
+            let task_idx = match plan.subtasks.iter().position(|t| t.status == SubtaskStatus::Pending) {
+                Some(i) => i,
+                None => break,
+            };
+
+            {
+                let task = &mut plan.subtasks[task_idx];
+                task.status = SubtaskStatus::InProgress;
+                task.started_at = Some(now_secs());
+            }
+            plan.save(&self.root)?;
+
+            let task = plan.subtasks[task_idx].clone();
+            println!(
+                "\n⚙️  [{}/{}] Executing: {}\n    {}\n",
+                task.id, plan.total(), task.title, task.description
+            );
+
+            // Build a focused goal for the agent
+            let subtask_goal = format!(
+                "## OVERALL GOAL\n{}\n\n## YOUR CURRENT SUBTASK (#{} of {})\n{}\n\n## DESCRIPTION\n{}\n\n## ACCEPTANCE CRITERION\n{}\n\n## ALREADY DONE\n{}",
+                plan.goal,
+                task.id,
+                plan.total(),
+                task.title,
+                task.description,
+                task.acceptance,
+                plan.subtasks[..task_idx]
+                    .iter()
+                    .filter(|t| t.status == SubtaskStatus::Done)
+                    .map(|t| format!("✅ {}: {}", t.title, t.result_summary.as_deref().unwrap_or("done")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+
+            let execution_log = match self.run_agent_for_goal(&subtask_goal) {
+                Ok(log) => log,
+                Err(e) => format!("AGENT ERROR: {}", e),
+            };
+
+            // Reflect on what happened
+            println!("\n🪞 Reflecting on subtask outcome...\n");
+            let reflection = planner.reflect_on_subtask(&plan, task_idx, &execution_log);
+
+            match reflection {
+                Ok(r) => {
+                    // Collect data needed after mutable borrow ends
+                    let (task_id, task_title) = {
+                        let task = &mut plan.subtasks[task_idx];
+                        task.finished_at = Some(now_secs());
+                        task.result_summary = Some(r.result_summary.clone());
+                        task.files_touched = r.files_touched.clone();
+
+                        match &r.verdict {
+                            crate::planner::ReflectionVerdict::Done => {
+                                task.status = SubtaskStatus::Done;
+                                println!("✅ Subtask done: {}", r.result_summary);
+                            }
+                            crate::planner::ReflectionVerdict::Retry => {
+                                task.status = SubtaskStatus::Pending;
+                                println!("🔄 Retrying: {}", r.reason);
+                            }
+                            crate::planner::ReflectionVerdict::Skip => {
+                                task.status = SubtaskStatus::Skipped(r.reason.clone());
+                                println!("⏭️  Skipped: {}", r.reason);
+                            }
+                            crate::planner::ReflectionVerdict::Blocked => {
+                                task.status = SubtaskStatus::Blocked(r.blocker.clone());
+                                println!("🚧 Blocked: {}", r.blocker);
+                            }
+                        }
+                        (task.id, task.title.clone())
+                    };
+                    // mutable borrow of plan.subtasks[task_idx] ends here
+
+                    if r.verdict == crate::planner::ReflectionVerdict::Blocked {
+                        output.push_str(&format!("\n🚧 **Blocked on subtask #{}: {}**\n   {}\n", task_id, task_title, r.blocker));
+                        plan.save(&self.root)?;
+                        break;
+                    }
+
+                    // Apply replan if needed
+                    if r.replan_needed && !r.replan_additions.is_empty() {
+                        println!("📋 Replanning: adding {} new subtask(s).", r.replan_additions.len());
+                        planner.apply_replan(&mut plan, task_idx, r.replan_additions);
+                    }
+
+                    output.push_str(&format!("[{}] {}: {}\n", task_id, task_title, r.result_summary));
+                }
+                Err(e) => {
+                    // Reflection failed — mark done and continue
+                    let (task_id, task_title) = {
+                        let task = &mut plan.subtasks[task_idx];
+                        task.status = SubtaskStatus::Done;
+                        task.result_summary = Some(format!("Completed (reflection failed: {})", e));
+                        task.finished_at = Some(now_secs());
+                        (task.id, task.title.clone())
+                    };
+                    output.push_str(&format!("[{}] {}: done (reflection failed)\n", task_id, task_title));
+                }
+            }
+
+            plan.touch();
+            plan.save(&self.root)?;
+            println!("{}", plan.render_dashboard());
+        }
+
+        if plan.is_complete() {
+            plan.phase = crate::planner::PlanPhase::Done;
+            plan.save(&self.root)?;
+            self.memory.add(
+                "task-execution",
+                format!("GOAL: {}\nCOMPLETE. Subtasks: {}", plan.goal, plan.total()),
+            );
+            Ok(format!(
+                "{}\n\n🎉 **Goal complete:** {}\n\n{}",
+                plan.render_dashboard(),
+                plan.goal,
+                output
+            ))
+        } else {
+            Ok(format!(
+                "{}\n\n⏸️  Plan paused. Run `:task` to continue.\n\n{}",
+                plan.render_dashboard(),
+                output
+            ))
+        }
+    }
+
+    /// Direct single-shot agent execution (no planning layer).
+    fn run_agent_for_goal(&mut self, goal: &str) -> Result<String> {
         let model = match &self.model {
             Some(m) => m,
-            None => return self.get_next_task(Some(goal)),
+            None => return Ok("No model configured.".to_string()),
         };
         let config = AgentConfig {
             auto_approve: self.auto_approve,
@@ -2871,8 +4097,7 @@ impl CodexEngine {
             &system_context,
             self.search.as_deref().map(|s| s as &dyn SearchProvider),
         )?;
-        self.memory
-            .add("task-execution", format!("TASK: {}\nRESULT: {}", goal, result));
+        self.memory.add("task-execution", format!("TASK: {}\nRESULT: {}", goal, result));
         Ok(result)
     }
 
@@ -3048,6 +4273,72 @@ impl CodexEngine {
 
     /// Builds a comprehensive grounding context for external AI integrations (like MCP)
     /// to ensure the agent doesn't hallucinate facts about the user or project.
+    /// Install a git pre-commit hook that runs Astra's review gate and
+    /// blocks the commit if critical issues are found.
+    fn install_review_gate(&self) -> String {
+        let hooks_dir = self.root.join(".git").join("hooks");
+        if !hooks_dir.exists() {
+            return "❌ No .git/hooks directory found. Is this a git repository?".to_string();
+        }
+        let hook_path = hooks_dir.join("pre-commit");
+
+        // Cross-platform-ish shell hook. Runs `astra :review` and blocks on ⛔ BLOCK.
+        let hook = "#!/bin/sh\n\
+# Astra ship-gate — blocks commits with critical issues.\n\
+echo \"🔍 Astra is reviewing your changes before commit...\"\n\
+REVIEW_OUTPUT=$(astra \":review\" 2>/dev/null)\n\
+echo \"$REVIEW_OUTPUT\"\n\
+if echo \"$REVIEW_OUTPUT\" | grep -q \"⛔ BLOCK\"; then\n\
+  echo \"\"\n\
+  echo \"⛔ Commit blocked by Astra: critical issues found. Fix them or run 'git commit --no-verify' to bypass.\"\n\
+  exit 1\n\
+fi\n\
+exit 0\n";
+
+        if let Err(e) = std::fs::write(&hook_path, hook) {
+            return format!("❌ Failed to write pre-commit hook: {}", e);
+        }
+
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&hook_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&hook_path, perms);
+            }
+        }
+
+        format!(
+            "✅ Ship-gate installed at {}\n\nFrom now on, every `git commit` runs Astra's review and blocks if critical issues are found.\nBypass once with: git commit --no-verify",
+            hook_path.display()
+        )
+    }
+
+    /// Compact project snapshot used by the PM and planner brains.
+    fn pm_context_snapshot(&self) -> String {
+        let stats = self.index.stats();
+        let by_lang: Vec<(String, usize)> = {
+            let mut v: Vec<_> = self.index.files_by_language().into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v
+        };
+        let memory_facts: Vec<String> = self
+            .memory
+            .recent(6)
+            .iter()
+            .map(|e| format!("[{}] {}", e.kind, &e.content[..e.content.len().min(120)]))
+            .collect();
+        crate::planner::build_context_snapshot(
+            &self.root,
+            stats.file_count,
+            stats.total_lines,
+            &by_lang,
+            &memory_facts,
+        )
+    }
+
     pub fn build_grounding_context(&self) -> String {
         let mut context = String::from("### GROUNDING CONTEXT (TREAT AS FACT)\n");
 
@@ -3068,33 +4359,21 @@ impl CodexEngine {
         let stats = self.index.stats();
         let _ = writeln!(&mut context, "\nCodebase Stats: {} files indexed, {} total lines.", stats.file_count, stats.total_lines);
 
-        let team_mgr = TeamManager::new(&self.root);
-        if let Ok(state) = team_mgr.load_state() {
-            if !state.team_name.is_empty() {
-                let user = load_global_config()
-                    .user
-                    .unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local_dev".to_string()));
-                let normalize = |v: &str| v.trim().trim_start_matches('@').to_ascii_lowercase();
-                let user_norm = normalize(&user);
-                let is_member = state.members.keys().any(|name| normalize(name) == user_norm);
-                let _ = writeln!(
-                    &mut context,
-                    "Team State: team='{}', user='{}', member={}",
-                    state.team_name, user, is_member
-                );
-                if is_member {
-                    let my_open = state
-                        .tasks
-                        .values()
-                        .filter(|t| normalize(&t.assignee) == user_norm)
-                        .filter(|t| t.status != crate::teams::TaskStatus::Done)
-                        .map(|t| format!("[{}] {}", t.id, t.description))
-                        .collect::<Vec<_>>();
-                    if !my_open.is_empty() {
-                        let _ = writeln!(&mut context, "My Open Team Tasks: {}", my_open.join(" | "));
-                    }
-                }
-            }
+        if let Some(architecture) = self.architecture_context_summary("codebase architecture overview") {
+            let _ = writeln!(&mut context, "\nArchitecture Snapshot:\n{}", architecture);
+        }
+
+        if self.temporal_graph.enriched {
+            let history = self.temporal_graph.project_history_report();
+            let _ = writeln!(
+                &mut context,
+                "\nProject History Snapshot:\n{}",
+                history.chars().take(1600).collect::<String>()
+            );
+        }
+
+        if let Some(team_context) = self.team_context_summary() {
+            let _ = writeln!(&mut context, "\nTeam Snapshot:\n{}", team_context);
         }
 
         context
@@ -3307,6 +4586,81 @@ impl CodexEngine {
             }
         }
 
+        // Project evolution questions: "full history", "how did this project evolve?"
+        if lower.contains("project history")
+            || lower.contains("full history")
+            || lower.contains("history of the project")
+            || lower.contains("history of this project")
+            || lower.contains("project evolution")
+            || lower.contains("how did this project evolve")
+            || lower.contains("how has this project changed")
+        {
+            let report = self.temporal_graph.project_history_report();
+            if report.len() > 50 {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!(
+                        "[Project history] {}",
+                        report.chars().take(1800).collect::<String>()
+                    ),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
+        if lower.contains("team status")
+            || (lower.contains("team") && lower.contains("working on"))
+            || (lower.contains("team") && lower.contains("doing"))
+            || lower.contains("who is working on what")
+        {
+            if let Ok(report) = self.team_status_summary() {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!("[Team status] {}", report.chars().take(1500).collect::<String>()),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
+        if lower.contains("where should i start")
+            || lower.contains("onboard me")
+            || lower.contains("onboarding")
+            || lower.contains("understand this codebase")
+            || lower.contains("how should i get started")
+        {
+            let report = self.render_onboarding();
+            if report.len() > 50 {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!("[Onboarding] {}", report.chars().take(1800).collect::<String>()),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
+        if lower.contains("project summary")
+            || lower.contains("overview of the project")
+            || lower.contains("summarize this codebase")
+            || lower.contains("summarize the project")
+            || lower.contains("what does this project do")
+        {
+            if let Some(summary) = self.architecture_context_summary(question) {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!("[Project summary] {}", summary.chars().take(1600).collect::<String>()),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
+            }
+        }
+
         // Timeline / history questions: "history of engine.rs", "what happened to config.rs"
         if lower.contains("timeline")
             || lower.contains("history of")
@@ -3323,6 +4677,27 @@ impl CodexEngine {
                         embedding: None,
                     });
                 }
+            }
+        }
+
+        if lower.contains("hotspots")
+            || lower.contains("most changed files")
+            || lower.contains("change hotspots")
+            || lower.contains("churn hotspots")
+            || lower.contains("hot files")
+        {
+            let report = self.temporal_graph.hotspot_report();
+            if report.len() > 50 {
+                extra.push(MemoryEntry {
+                    kind: "tool-result".to_string(),
+                    content: format!(
+                        "[Hotspots] {}",
+                        report.chars().take(1600).collect::<String>()
+                    ),
+                    timestamp: now_ts,
+                    event: None,
+                    embedding: None,
+                });
             }
         }
 
@@ -3482,6 +4857,13 @@ impl CodexEngine {
 }
 
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn resolve_memory_path(root: &Path) -> PathBuf {
     let global_brain = crate::config::get_global_brain_path(root);
     let preferred = global_brain.join("episodic_memory.json");
@@ -3547,6 +4929,78 @@ fn is_project_context_question(question: &str) -> bool {
         "here",
     ];
     keywords.iter().any(|k| lower.contains(k))
+}
+
+fn is_architecture_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    let keywords = [
+        "architecture",
+        "structure",
+        "organized",
+        "organised",
+        "overview",
+        "module",
+        "modules",
+        "component",
+        "components",
+        "service",
+        "services",
+        "dependency",
+        "dependencies",
+        "coupling",
+        "flow",
+        "where is",
+        "where are",
+        "how does",
+        "how do",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+fn is_team_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    let keywords = [
+        "team",
+        "developer",
+        "developers",
+        "member",
+        "members",
+        "task",
+        "tasks",
+        "assignee",
+        "assigned",
+        "session",
+        "sessions",
+        "ownership",
+        "owner",
+        "who owns",
+        "bus factor",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+fn is_social_message(question: &str) -> bool {
+    let lower = question.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "hey"
+            | "hi"
+            | "hello"
+            | "hey astra"
+            | "hi astra"
+            | "hello astra"
+            | "astra"
+            | "sup"
+            | "yo"
+            | "what's up"
+            | "whats up"
+            | "how are you"
+            | "how are you astra"
+            | "how r you"
+            | "how you doing"
+            | "how's it going"
+            | "hows it going"
+    )
 }
 
 fn is_name_question(question: &str) -> bool {
@@ -3658,11 +5112,50 @@ fn include_memory_entry_in_answer(entry: &MemoryEntry, question: &str) -> bool {
     true
 }
 
+fn extract_query_terms(question: &str) -> Vec<String> {
+    let stop_words = [
+        "the", "a", "an", "is", "are", "to", "for", "of", "in", "on", "at", "how", "why",
+        "what", "where", "when", "does", "do", "did", "this", "that", "these", "those",
+        "with", "and", "from", "about", "into", "your", "our",
+    ];
+    let mut seen = HashSet::new();
+    question
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|c: char| {
+                !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/'
+            })
+            .to_ascii_lowercase()
+        })
+        .filter(|token| token.len() >= 3)
+        .filter(|token| !stop_words.contains(&token.as_str()))
+        .filter(|token| seen.insert(token.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::CodexEngine;
-    use crate::memory::MemoryEntry;
+    use crate::index::CodeIndex;
+    use crate::memory::{MemoryEntry, MemoryStore};
+    use crate::rag::{Chunk, VectorStore};
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fresh_engine() -> CodexEngine {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("astra_engine_test_{}_{}", std::process::id(), unique));
+        let _ = fs::create_dir_all(&root);
+        let mut engine = CodexEngine::with_root(root);
+        engine.memory = MemoryStore::default();
+        engine.index = CodeIndex::new();
+        engine.vector_store = VectorStore::new();
+        engine
+    }
 
     #[test]
     fn parses_loose_natural_migration_request() {
@@ -3741,10 +5234,66 @@ mod tests {
             content: "old conversation".to_string(),
             timestamp: 0,
             event: None,
+            embedding: None,
         };
         assert!(!super::include_memory_entry_in_answer(
             &entry,
             "what's on the agenda"
         ));
+    }
+
+    #[test]
+    fn ranks_direct_file_mentions_first() {
+        let mut engine = fresh_engine();
+        engine
+            .index
+            .add_file(PathBuf::from("src/auth.rs"), "pub fn login_user() {}\n");
+        engine
+            .index
+            .add_file(PathBuf::from("src/payments.rs"), "pub fn charge_card() {}\n");
+
+        let ranked = engine.rank_relevant_files("explain src/auth.rs", 2);
+        assert_eq!(ranked.first(), Some(&PathBuf::from("src/auth.rs")));
+    }
+
+    #[test]
+    fn collects_relevant_chunks_from_file_mentions() {
+        let mut engine = fresh_engine();
+        engine.vector_store.chunks = vec![
+            Chunk {
+                id: "src/auth.rs::0".to_string(),
+                path: PathBuf::from("src/auth.rs"),
+                start_line: 1,
+                end_line: 4,
+                content: "pub fn login_user() {}\n".to_string(),
+                language: "rust".to_string(),
+                embedding: None,
+            },
+            Chunk {
+                id: "src/payments.rs::0".to_string(),
+                path: PathBuf::from("src/payments.rs"),
+                start_line: 1,
+                end_line: 4,
+                content: "pub fn charge_card() {}\n".to_string(),
+                language: "rust".to_string(),
+                embedding: None,
+            },
+        ];
+
+        let chunks = engine.collect_relevant_chunks("what happens in auth.rs", None, 3);
+        assert_eq!(chunks.first().map(|chunk| chunk.path.clone()), Some(PathBuf::from("src/auth.rs")));
+    }
+
+    #[test]
+    fn relevant_memories_skip_noisy_conversation_entries() {
+        let mut engine = fresh_engine();
+        engine.memory.add("qa", "Q: hi\nA: hello".to_string());
+        engine
+            .memory
+            .remember_project_fact("goal", "make astra feel like a real pair engineer");
+
+        let memories = engine.collect_relevant_memories("what is the project goal", None);
+        assert!(memories.iter().any(|entry| entry.kind == "project-fact"));
+        assert!(memories.iter().all(|entry| entry.kind != "qa"));
     }
  }
