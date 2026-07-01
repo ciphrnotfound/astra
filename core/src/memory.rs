@@ -264,6 +264,10 @@ impl MemoryStore {
         self.upsert_local_keyed("style-memory", key, value);
     }
 
+    pub fn remember_conversation_state(&mut self, key: &str, value: &str) {
+        self.upsert_local_keyed("conversation-state", key, value);
+    }
+
     pub fn user_facts(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if let Some(global) = &self.global {
@@ -285,6 +289,36 @@ impl MemoryStore {
         let mut out = Vec::new();
         collect_keyed_entries(&self.entries, "style-memory", &mut out);
         dedupe_keyed_pairs(out)
+    }
+
+    pub fn conversation_state_facts(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        collect_keyed_entries(&self.entries, "conversation-state", &mut out);
+        dedupe_keyed_pairs(out)
+    }
+
+    pub fn style_report(&self) -> Option<String> {
+        let styles = self.style_facts();
+        if styles.is_empty() {
+            return None;
+        }
+        let mut out = String::from("Style preferences:\n");
+        for (key, value) in styles {
+            out.push_str(&format!("- {}: {}\n", key, value));
+        }
+        Some(out.trim_end().to_string())
+    }
+
+    pub fn conversation_state_report(&self) -> Option<String> {
+        let facts = self.conversation_state_facts();
+        if facts.is_empty() {
+            return None;
+        }
+        let mut out = String::from("Conversation state:\n");
+        for (key, value) in facts {
+            out.push_str(&format!("- {}: {}\n", key, value));
+        }
+        Some(out.trim_end().to_string())
     }
 
     pub fn profile_report(&self) -> String {
@@ -428,6 +462,9 @@ impl MemoryStore {
             }
             if entry.kind == "style-memory" {
                 score += 0.35;
+            }
+            if entry.kind == "conversation-state" {
+                score += 0.4;
             }
 
             if let Some((key, value)) = parse_key_value(&entry.content) {

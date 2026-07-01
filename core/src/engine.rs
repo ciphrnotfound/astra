@@ -1832,6 +1832,8 @@ impl CodexEngine {
         if !trimmed.starts_with(':') && !trimmed.starts_with("? ") {
             // ── Auto-fact extraction: silently learn personal facts from conversation ──
             self.auto_extract_facts(trimmed);
+            self.memory
+                .remember_conversation_state("last_user_message", trimmed);
             return self.answer_question(trimmed);
         }
 
@@ -2394,6 +2396,7 @@ impl CodexEngine {
 
             let recent_qa = self.recent_conversation_context(3);
             let last_turn = self.recent_conversation_context(1);
+            let last_two_turns = self.recent_conversation_context(2);
             let last_turn_snippet = last_turn
                 .first()
                 .map(|s| {
@@ -2403,6 +2406,18 @@ impl CodexEngine {
                         t
                     } else {
                         s.clone()
+                    }
+                });
+            let last_two_snippet = last_two_turns
+                .first()
+                .map(|_| last_two_turns.join("\n\n"))
+                .map(|s| {
+                    if s.len() > 1200 {
+                        let mut t = s.chars().take(1200).collect::<String>();
+                        t.push_str("... [TRUNCATED]");
+                        t
+                    } else {
+                        s
                     }
                 });
             let relevant_files = self.collect_relevant_file_hints(question, 4);
@@ -2629,8 +2644,36 @@ impl CodexEngine {
             let _ = writeln!(&mut user_prompt, "{}", question);
             let _ = writeln!(&mut user_prompt);
             if !social_question {
-                if let Some(snippet) = &last_turn_snippet {
-                    let _ = writeln!(&mut user_prompt, "### LAST TURN CONTEXT (FOR CONTINUITY)");
+                let convo_state = self.memory.conversation_state_report();
+                if let Some(convo_state) = &convo_state {
+                    let _ = writeln!(&mut user_prompt, "### CONVERSATION STATE (FOR CONTINUITY)");
+                    let _ = writeln!(
+                        &mut user_prompt,
+                        "Use this silently for continuity. Do not recap it unless the user asks.\n{}",
+                        convo_state
+                    );
+                    let _ = writeln!(&mut user_prompt);
+                }
+                let style = self.memory.style_report();
+                if let Some(style) = &style {
+                    let _ = writeln!(&mut user_prompt, "### STYLE PREFERENCES");
+                    let _ = writeln!(
+                        &mut user_prompt,
+                        "These are user preferences. Follow them unless they conflict with safety/grounding.\n{}",
+                        style
+                    );
+                    let _ = writeln!(&mut user_prompt);
+                }
+                if let Some(snippet) = &last_two_snippet {
+                    let _ = writeln!(&mut user_prompt, "### LAST 2 TURNS (FOR CONTINUITY)");
+                    let _ = writeln!(
+                        &mut user_prompt,
+                        "Use this silently to keep continuity. Do not recap it unless the user asks.\n{}",
+                        snippet
+                    );
+                    let _ = writeln!(&mut user_prompt);
+                } else if let Some(snippet) = &last_turn_snippet {
+                    let _ = writeln!(&mut user_prompt, "### LAST TURN (FOR CONTINUITY)");
                     let _ = writeln!(
                         &mut user_prompt,
                         "Use this silently to keep continuity. Do not recap it unless the user asks.\n{}",
@@ -4414,6 +4457,26 @@ exit 0\n";
         if let Some(style) = extract_value_after_any(input, &["i want astra to ", "astra should ", "make astra "]) {
             if style.len() >= 3 {
                 self.memory.remember_style_fact("assistant_style", &style);
+            }
+        }
+        if !lower.ends_with('?') {
+            let trimmed = input.trim();
+            if trimmed.len() >= 8 {
+                if lower.starts_with("it should")
+                    || lower.starts_with("it needs")
+                    || lower.starts_with("it must")
+                    || lower.contains("should be")
+                    || lower.contains("needs to")
+                {
+                    let style = if trimmed.len() > 200 {
+                        let mut t = trimmed.chars().take(200).collect::<String>();
+                        t.push_str("... [TRUNCATED]");
+                        t
+                    } else {
+                        trimmed.to_string()
+                    };
+                    self.memory.remember_style_fact("assistant_style", &style);
+                }
             }
         }
 
