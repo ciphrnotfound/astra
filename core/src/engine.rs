@@ -2393,6 +2393,18 @@ impl CodexEngine {
             }
 
             let recent_qa = self.recent_conversation_context(3);
+            let last_turn = self.recent_conversation_context(1);
+            let last_turn_snippet = last_turn
+                .first()
+                .map(|s| {
+                    if s.len() > 700 {
+                        let mut t = s.chars().take(700).collect::<String>();
+                        t.push_str("... [TRUNCATED]");
+                        t
+                    } else {
+                        s.clone()
+                    }
+                });
             let relevant_files = self.collect_relevant_file_hints(question, 4);
             let social_question = is_social_message(question);
             let architecture_context = if !social_question
@@ -2616,6 +2628,17 @@ impl CodexEngine {
             let _ = writeln!(&mut user_prompt, "### USER QUESTION");
             let _ = writeln!(&mut user_prompt, "{}", question);
             let _ = writeln!(&mut user_prompt);
+            if !social_question {
+                if let Some(snippet) = &last_turn_snippet {
+                    let _ = writeln!(&mut user_prompt, "### LAST TURN CONTEXT (FOR CONTINUITY)");
+                    let _ = writeln!(
+                        &mut user_prompt,
+                        "Use this silently to keep continuity. Do not recap it unless the user asks.\n{}",
+                        snippet
+                    );
+                    let _ = writeln!(&mut user_prompt);
+                }
+            }
             let _ = writeln!(&mut user_prompt, "### VERIFIED PROJECT CONTEXT");
             let _ = writeln!(&mut user_prompt, "- Root: {:?}", self.root);
             let _ = writeln!(
@@ -4386,6 +4409,12 @@ exit 0\n";
         // Don't extract from questions
         if lower.ends_with('?') || lower.len() < 8 {
             return;
+        }
+
+        if let Some(style) = extract_value_after_any(input, &["i want astra to ", "astra should ", "make astra "]) {
+            if style.len() >= 3 {
+                self.memory.remember_style_fact("assistant_style", &style);
+            }
         }
 
         // Patterns that indicate a personal fact — we search for these ANYWHERE in the input

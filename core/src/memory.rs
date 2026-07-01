@@ -373,6 +373,8 @@ impl MemoryStore {
             return Vec::new();
         }
 
+        let now = now_secs();
+
         // Collect all entries: local + global
         let mut all_entries: Vec<&MemoryEntry> = self.entries.iter().collect();
         if let Some(global) = &self.global {
@@ -380,9 +382,15 @@ impl MemoryStore {
         }
 
         // Tokenize query, skipping common stop words
-        let stop_words = ["what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did", "how", "why", "where"];
+        let stop_words = [
+            "what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did",
+            "how", "why", "where", "to", "of", "in", "at", "with", "and", "or", "me", "you",
+            "we", "this", "that",
+        ];
         let query_tokens: Vec<&str> = trimmed
             .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'))
+            .filter(|w| !w.is_empty())
             .filter(|w| !stop_words.contains(w) && w.len() > 1)
             .collect();
 
@@ -403,6 +411,11 @@ impl MemoryStore {
         let mut scored_matches: Vec<(f32, MemoryEntry)> = all_entries.iter().rev().map(|entry| {
             let mut score = 0.0;
             let content_lower = entry.content.to_ascii_lowercase();
+
+            let age_secs = now.saturating_sub(entry.timestamp);
+            let age_days = (age_secs / 86_400) as f32;
+            let recency_boost = 0.25 / (1.0 + (age_days / 14.0));
+            score += recency_boost;
             
             // Keyword match
             for token in &query_tokens {
@@ -412,6 +425,19 @@ impl MemoryStore {
             }
             if entry.kind == "user-identity" || entry.kind == "user-preference" || entry.kind == "project-fact" || entry.kind == "fact" {
                 score += 0.5;
+            }
+            if entry.kind == "style-memory" {
+                score += 0.35;
+            }
+
+            if let Some((key, value)) = parse_key_value(&entry.content) {
+                for token in &query_tokens {
+                    if key == *token {
+                        score += 0.6;
+                    } else if value.to_ascii_lowercase().contains(token) {
+                        score += 0.25;
+                    }
+                }
             }
 
             // Vector match
