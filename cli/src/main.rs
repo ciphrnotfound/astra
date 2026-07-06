@@ -295,6 +295,16 @@ fn main() -> Result<()> {
         let model = args.ollama_model.clone().or_else(|| std::env::var("OLLAMA_MODEL").ok());
         let ollama = OllamaModel::from_env(model, Some(ollama_url))?;
         engine.set_model(Box::new(ollama));
+    } else if args.use_groq || std::env::var("GROQ_API_KEY").is_ok() || astra_core::config::load_global_config().groq_api_key.is_some() {
+        let model_name = args.groq_model.clone().or_else(|| persona.model.clone());
+        let groq = GroqModel::from_env(model_name)?;
+        engine.set_model(Box::new(groq));
+        
+        if std::env::var("GEMINI_API_KEY").is_ok() || astra_core::config::load_global_config().gemini_api_key.is_some() {
+            if let Ok(gemini) = GeminiModel::from_env(None) {
+                engine.set_embedder(Box::new(gemini));
+            }
+        }
     } else if args.use_gemini || std::env::var("GEMINI_API_KEY").is_ok() || astra_core::config::load_global_config().gemini_api_key.is_some() {
         let model_name = args.gemini_model.clone().or_else(|| persona.model.clone());
         let gemini = GeminiModel::from_env(model_name)?;
@@ -315,10 +325,6 @@ fn main() -> Result<()> {
         let model_name = args.openrouter_model.clone().or_else(|| persona.model.clone());
         let openrouter = OpenRouterModel::from_env(model_name)?;
         engine.set_model(Box::new(openrouter));
-    } else if args.use_groq || std::env::var("GROQ_API_KEY").is_ok() {
-        let model_name = args.groq_model.clone().or_else(|| persona.model.clone());
-        let groq = GroqModel::from_env(model_name)?;
-        engine.set_model(Box::new(groq));
     }
 
     if std::env::var("TAVILY_API_KEY").is_ok() {
@@ -371,13 +377,17 @@ fn main() -> Result<()> {
                         cfg.tavily_api_key = Some(value.clone());
                         println!("✅ Tavily API Key saved locally.");
                     }
+                    "openai_api_key" => {
+                        cfg.openai_api_key = Some(value.clone());
+                        println!("✅ OpenAI API Key saved locally (used for voice dictation).");
+                    }
                     "ollama_url" => {
                         cfg.ollama_url = Some(value.clone());
                         println!("✅ Configured Ollama URL.");
                     }
                     _ => {
                         eprintln!("❌ Unknown config key: {}", key);
-                        eprintln!("Supported keys: user, gemini_api_key, groq_api_key, openrouter_api_key, tavily_api_key, ollama_url");
+                        eprintln!("Supported keys: user, gemini_api_key, groq_api_key, openrouter_api_key, tavily_api_key, openai_api_key, ollama_url");
                         std::process::exit(1);
                     }
                 }
@@ -993,15 +1003,44 @@ fn print_team_status(team_mgr: &TeamManager) -> Result<()> {
     Ok(())
 }
 
-fn run_repl(engine: &mut CodexEngine, root: &Path) -> Result<()> {
-    println!("{}", "╭──────────────────────────────────────────────────╮".dark_grey());
-    if engine.root().join(".astra").join("memory.json").exists() {
-        // Check if agent mode is active
-        println!("{} {} {}", "│".dark_grey(), "◈ Astra v0.1.0".white().bold(), "— Your codebase companion      │".dark_grey());
-    } else {
-        println!("{} {} {}", "│".dark_grey(), "◈ Astra v0.1.0".white().bold(), "— Your codebase companion      │".dark_grey());
+fn print_astra_banner(engine: &CodexEngine) {
+    // ASTRA wordmark in block ASCII — solid white.
+    let logo = [
+        "    █████╗ ███████╗████████╗██████╗  █████╗ ",
+        "   ██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔══██╗",
+        "   ███████║███████╗   ██║   ██████╔╝███████║",
+        "   ██╔══██║╚════██║   ██║   ██╔══██╗██╔══██║",
+        "   ██║  ██║███████║   ██║   ██║  ██║██║  ██║",
+        "   ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝",
+    ];
+
+    println!();
+    for line in logo.iter() {
+        println!("{}", line.white().bold());
     }
-    println!("{}", "╰──────────────────────────────────────────────────╯".dark_grey());
+
+    // Subtitle + version + project status line
+    let stats = engine.index().stats();
+    let status = if stats.file_count > 0 {
+        format!("{} files · {} lines indexed", stats.file_count, stats.total_lines)
+    } else {
+        "no index yet — run :index".to_string()
+    };
+    println!(
+        "   {}  {}  {}",
+        "The Codebase Operating System".grey(),
+        "v0.1.6".dark_grey(),
+        format!("· {}", status).dark_grey()
+    );
+    println!(
+        "   {}",
+        "type a question, or :help for commands · :quit to exit".dark_grey()
+    );
+    println!();
+}
+
+fn run_repl(engine: &mut CodexEngine, root: &Path) -> Result<()> {
+    print_astra_banner(engine);
     
     // ── Proactive Task Dashboard ────────────────────────────────────
     let team_mgr = TeamManager::new(root);
@@ -1133,9 +1172,10 @@ fn run_repl(engine: &mut CodexEngine, root: &Path) -> Result<()> {
         println!("{}\n", "──────────────────────────────────────────────────".dark_grey());
     }
 
-    println!("{}", " Try `:index` to build the semantic graph, or ask:".dark_grey());
-    println!("{}", "  ? what does this project do?".dark_grey());
-    println!("{}", "  migrate core/src from rs to ts into ./out".dark_grey());
+    println!("{}", "  ◆ REVIEW   :review              scan changes, catch unsafe code".dark_grey());
+    println!("{}", "  ◆ PLAN     :task <goal>         decompose & autonomously execute".dark_grey());
+    println!("{}", "  ◆ SHIP     :ship  :pr  :release     commit, push, open PRs".dark_grey());
+    println!("{}", "  ◆ SCOPE    :spec <idea>  :sharpen   turn ideas into specs".dark_grey());
     println!();
 
     // ── Session Tracker ─────────────────────────────────────────────

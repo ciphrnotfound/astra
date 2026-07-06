@@ -165,33 +165,12 @@ impl MemoryStore {
                     return Some(name.to_string());
                 }
             }
-            // Fallback: check "fact" entries that mention name
-            for entry in global.entries.iter().rev() {
-                if entry.kind == "fact" {
-                    let lower = entry.content.to_ascii_lowercase();
-                    if lower.starts_with("my name is ") {
-                        let name = entry.content["my name is ".len()..].trim().to_string();
-                        if !name.is_empty() {
-                            return Some(name);
-                        }
-                    }
-                }
-            }
         }
         // Also check local memory
         for entry in self.entries.iter().rev() {
             if entry.kind == "user-identity" {
                 if let Some(name) = entry.content.strip_prefix("name: ") {
                     return Some(name.to_string());
-                }
-            }
-            if entry.kind == "fact" {
-                let lower = entry.content.to_ascii_lowercase();
-                if lower.starts_with("my name is ") {
-                    let name = entry.content["my name is ".len()..].trim().to_string();
-                    if !name.is_empty() {
-                        return Some(name);
-                    }
                 }
             }
         }

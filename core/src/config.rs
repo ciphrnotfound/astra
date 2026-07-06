@@ -24,6 +24,8 @@ pub struct AstraConfig {
     pub tavily_api_key: Option<String>,
     #[serde(default)]
     pub ollama_url: Option<String>,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
 }
 
 pub fn get_global_config_path() -> PathBuf {

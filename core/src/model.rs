@@ -312,6 +312,7 @@ impl OpenRouterModel {
 struct GroqChatRequest {
     model: String,
     messages: Vec<GroqMessage>,
+    temperature: f32,
 }
 
 #[derive(Serialize)]
@@ -448,6 +449,7 @@ impl CodexModel for GroqModel {
                     content: user.to_string(),
                 },
             ],
+            temperature: 0.1,
         };
 
         let mut delay = Duration::from_secs(3);

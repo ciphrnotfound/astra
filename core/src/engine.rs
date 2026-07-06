@@ -598,6 +598,25 @@ impl CodexEngine {
                 return Ok(self.install_review_gate());
             }
 
+            // :review ack <n> — acknowledge a finding so it stops alarming
+            if let Some(num) = rest.strip_prefix("ack ") {
+                match num.trim().parse::<usize>() {
+                    Ok(n) => return Ok(crate::review::acknowledge(&self.root, n)),
+                    Err(_) => return Ok("Usage: :review ack <number>   (the # shown next to a finding)".to_string()),
+                }
+            }
+            if rest == "acked" || rest == "ack" {
+                let mem = crate::review::ReviewMemory::load(&self.root);
+                if mem.acknowledged.is_empty() {
+                    return Ok("No acknowledged findings yet. Use `:review ack <#>` to acknowledge one.".to_string());
+                }
+                let mut out = String::from("🧠 Acknowledged findings (hidden from the ship-verdict):\n");
+                for (i, fp) in mem.acknowledged.iter().enumerate() {
+                    out.push_str(&format!("  {}. {}\n", i + 1, fp));
+                }
+                return Ok(out);
+            }
+
             let (files, scope_label): (Vec<String>, String) = if rest == "all" {
                 // Whole codebase: every indexed file
                 if self.index.stats().file_count == 0 {
@@ -610,6 +629,31 @@ impl CodexEngine {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
                 (files, "whole codebase".to_string())
+            } else if !rest.is_empty() {
+                // :review <path> — scope to a single file or path prefix.
+                let target = self.root.join(rest);
+                if target.is_file() {
+                    (vec![rest.to_string()], format!("file {}", rest))
+                } else {
+                    // Treat as a path filter over changed/indexed files.
+                    let pool: Vec<String> = match &self.git {
+                        Some(git) => git.changed_files(),
+                        None => self
+                            .index
+                            .files()
+                            .keys()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect(),
+                    };
+                    let matched: Vec<String> = pool
+                        .into_iter()
+                        .filter(|p| p.replace('\\', "/").contains(&rest.replace('\\', "/")))
+                        .collect();
+                    if matched.is_empty() {
+                        return Ok(format!("No file matching '{}' found to review. Try a path like `:review core/src/config.rs`.", rest));
+                    }
+                    (matched, format!("path filter '{}'", rest))
+                }
             } else {
                 // Default: git-changed files (what they're about to ship)
                 match &self.git {
@@ -2275,11 +2319,72 @@ impl CodexEngine {
     }
 
     fn answer_question(&mut self, question: &str) -> Result<String> {
+        if is_assistant_identity_question(question) {
+            return Ok("I’m Astra — your dev + codebase companion for this repo. What are we doing today?".to_string());
+        }
+
+        if is_what_should_we_do_question(question) {
+            let changed = self
+                .git
+                .as_ref()
+                .map(|g| g.changed_files())
+                .unwrap_or_default();
+            if !changed.is_empty() {
+                return Ok("We’ve got uncommitted changes. Want me to (1) review the diff, (2) run a quick health check, or (3) help you ship it clean?".to_string());
+            }
+            return Ok("Depends what you’re trying to do. Are we building a feature, fixing a bug, or just exploring the repo?".to_string());
+        }
+
         if is_name_question(question) {
             if let Some(name) = self.memory.user_name() {
-                return Ok(format!("Your name is {}.", name));
+                return Ok(format!(
+                    "I’ve got your name saved as “{}”. Is that still what you want me to call you?",
+                    name
+                ));
             }
-            return Ok("I don't know your name yet! Use `:learn my name is <your name>` to teach me.".to_string());
+            return Ok(
+                "I don’t actually know your name yet. Tell me “my name is <name>” and I’ll remember it."
+                    .to_string(),
+            );
+        }
+
+        if is_language_question(question) {
+            let stats = self.index.stats();
+            if stats.file_count == 0 {
+                return Ok(
+                    "I don’t have indexed project context yet, so I can’t answer language breakdown stuff without guessing. Run `:index` first, then ask again."
+                        .to_string(),
+                );
+            }
+            let lines_by_lang = self.index.lines_by_language();
+            let files_by_lang = self.index.files_by_language();
+
+            if let Some(lang) = extract_language_mention(question) {
+                let lines = *lines_by_lang.get(&lang).unwrap_or(&0);
+                let files = *files_by_lang.get(&lang).unwrap_or(&0);
+                if stats.total_lines > 0 {
+                    let pct = (lines as f64 / stats.total_lines as f64) * 100.0;
+                    return Ok(format!(
+                        "{}: {} lines across {} files (~{:.1}% of indexed lines).",
+                        lang, lines, files, pct
+                    ));
+                }
+                return Ok(format!("{}: {} lines across {} files.", lang, lines, files));
+            }
+
+            if let Some((top_lang, top_lines)) = top_language_by_lines(&lines_by_lang) {
+                if stats.total_lines > 0 {
+                    let pct = (top_lines as f64 / stats.total_lines as f64) * 100.0;
+                    return Ok(format!(
+                        "Dominant language (by lines): {} — {} lines (~{:.1}% of indexed lines).",
+                        top_lang, top_lines, pct
+                    ));
+                }
+                return Ok(format!(
+                    "Dominant language (by lines): {} — {} lines.",
+                    top_lang, top_lines
+                ));
+            }
         }
 
         // ── Direct personal fact lookup — gather ALL identity facts ──
@@ -2365,6 +2470,7 @@ impl CodexEngine {
             }
             let stats = self.index.stats();
             let by_lang = self.index.files_by_language();
+            let lines_by_lang = self.index.lines_by_language();
             let q_vec = self.get_query_embedding(question);
             let mut matches = self.collect_relevant_memories(question, q_vec.as_deref());
             let recent = self.memory.recent(3);
@@ -2711,16 +2817,26 @@ impl CodexEngine {
                     );
                 }
             }
-            if !by_lang.is_empty() {
+            if !lines_by_lang.is_empty() {
+                let mut top = lines_by_lang.into_iter().collect::<Vec<_>>();
+                top.sort_by(|a, b| b.1.cmp(&a.1));
+                let top_str = top
+                    .into_iter()
+                    .take(4)
+                    .map(|(lang, lines)| format!("{}={} lines", lang, lines))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(&mut user_prompt, "- Top languages (by lines): {}", top_str);
+            } else if !by_lang.is_empty() {
                 let mut top = by_lang.into_iter().collect::<Vec<_>>();
                 top.sort_by(|a, b| b.1.cmp(&a.1));
                 let top_str = top
                     .into_iter()
                     .take(4)
-                    .map(|(lang, count)| format!("{}={}", lang, count))
+                    .map(|(lang, count)| format!("{}={} files", lang, count))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(&mut user_prompt, "- Top languages: {}", top_str);
+                let _ = writeln!(&mut user_prompt, "- Top languages (by files): {}", top_str);
             }
 
             let task_path = self.root.join(".astra").join("active_task.json");
@@ -5101,6 +5217,65 @@ fn is_name_question(question: &str) -> bool {
         || lower.contains("whats my name")
         || lower.contains("what is my name")
         || lower.contains("who am i")
+}
+
+fn is_assistant_identity_question(question: &str) -> bool {
+    let lower = question.trim().to_ascii_lowercase();
+    lower == "who are you"
+        || lower == "what are you"
+        || lower == "what is your name"
+        || lower == "whats your name"
+        || lower == "what's your name"
+}
+
+fn is_what_should_we_do_question(question: &str) -> bool {
+    let lower = question.trim().to_ascii_lowercase();
+    lower == "what should we do"
+        || lower == "what do we do"
+        || lower == "what should i do"
+        || lower == "what now"
+        || lower == "now what"
+}
+
+fn is_language_question(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    lower.contains("major language")
+        || lower.contains("dominant language")
+        || lower.contains("language is dominant")
+        || lower.contains("what language is dominant")
+        || lower.contains("what language is used")
+        || lower.contains("major language used")
+        || lower.contains("what about rust")
+        || lower.contains("what about typescript")
+        || lower.contains("what about javascript")
+        || lower.contains("what about python")
+        || lower.contains("what about go")
+        || lower.contains("what about java")
+}
+
+fn extract_language_mention(question: &str) -> Option<String> {
+    let lower = question.to_ascii_lowercase();
+    let candidates = [
+        ("rust", "rust"),
+        ("typescript", "typescript"),
+        ("javascript", "javascript"),
+        ("python", "python"),
+        ("go", "go"),
+        ("java", "java"),
+    ];
+    for (needle, lang) in candidates {
+        if lower.contains(needle) {
+            return Some(lang.to_string());
+        }
+    }
+    None
+}
+
+fn top_language_by_lines(lines_by_lang: &std::collections::HashMap<String, usize>) -> Option<(String, usize)> {
+    lines_by_lang
+        .iter()
+        .max_by_key(|(_, lines)| **lines)
+        .map(|(lang, lines)| (lang.clone(), *lines))
 }
 
 fn is_personal_question(question: &str) -> bool {

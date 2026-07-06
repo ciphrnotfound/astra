@@ -28,3 +28,8 @@ pub mod orchestrator;
 pub mod workflow;
 pub mod semantic_graph;
 pub mod semantic_memory;
+pub mod rag;
+pub mod planner;
+pub mod devops;
+pub mod pm;
+pub mod review;

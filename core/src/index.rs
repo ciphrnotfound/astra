@@ -26,6 +26,8 @@ pub struct FileSummary {
     pub approx_fn_count: usize,
     pub symbols: Vec<SymbolSummary>,
     pub imports: Vec<ParsedImport>,
+    #[serde(default)]
+    pub chunk_ids: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ impl CodeIndex {
             approx_fn_count,
             symbols,
             imports,
+            chunk_ids: Vec::new(),
         };
         self.graph.add_file(&path, &summary);
         self.files.insert(path, summary);
@@ -172,6 +175,21 @@ impl CodeIndex {
             .map(|(path, summary)| {
                 (path.clone(), summary.line_count, summary.approx_fn_count)
             })
+            .collect()
+    }
+
+    pub fn set_chunk_ids(&mut self, path: &Path, ids: Vec<String>) {
+        if let Some(summary) = self.files.get_mut(path) {
+            summary.chunk_ids = ids;
+        }
+    }
+
+    /// Return all (path, language, content_snapshot) entries suitable for chunking.
+    /// Returns paths for all indexed files so the engine can re-read and chunk them.
+    pub fn indexed_paths(&self) -> Vec<(PathBuf, String)> {
+        self.files
+            .iter()
+            .map(|(p, s)| (p.clone(), s.language.clone()))
             .collect()
     }
 

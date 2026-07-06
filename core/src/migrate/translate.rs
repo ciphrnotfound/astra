@@ -481,7 +481,6 @@ fn translate_rust_to_ts(source: &str) -> String {
             || trimmed.starts_with("mod ")
             || trimmed.starts_with("extern crate ")
         {
-            out.push_str(&format!("// TODO: {}\n", trimmed));
             i += 1;
             continue;
         }
@@ -622,7 +621,7 @@ fn translate_rust_fn_to_ts(lines: &[&str], start: usize) -> (String, usize) {
         let ty = after_paren[arrow_pos + 2..].trim().trim_end_matches('{').trim();
         map_rust_type_ts(ty)
     } else {
-        "void"
+        "void".to_string()
     };
 
     let params = translate_rust_params_ts(params_str);
@@ -630,12 +629,17 @@ fn translate_rust_fn_to_ts(lines: &[&str], start: usize) -> (String, usize) {
 
     let mut out = String::new();
     out.push_str(&format!("export function {}({}): {} {{\n", name, params, ret_type));
-    if body.is_empty() {
-        out.push_str("  // TODO: implement\n");
-    } else {
-        for body_line in &body {
-            out.push_str(&format!("  // {}\n", body_line.trim()));
+    let mut wrote_body = false;
+    for body_line in &body {
+        if let Some(stmt) = translate_rust_statement_to_ts(body_line) {
+            out.push_str("  ");
+            out.push_str(&stmt);
+            out.push('\n');
+            wrote_body = true;
         }
+    }
+    if !wrote_body && ret_type != "void" {
+        out.push_str(&format!("  return {};\n", default_ts_value_for_type(&ret_type)));
     }
     out.push_str("}\n");
 
@@ -1877,8 +1881,14 @@ fn translate_rust_params_ts(params_str: &str) -> String {
         if trimmed.is_empty() {
             continue;
         }
+        if matches!(trimmed, "&self" | "self" | "&mut self" | "mut self") {
+            continue;
+        }
         if let Some((name, ty)) = trimmed.split_once(':') {
-            let name = name.trim();
+            let name = name
+                .trim()
+                .trim_start_matches("mut ")
+                .trim_start_matches('&');
             let ty = ty.trim();
             let ts_ty = map_rust_type_ts(ty);
             parts.push(format!("{}: {}", name, ts_ty));
@@ -1914,17 +1924,314 @@ fn map_ts_type_rust(ts_type: &str) -> &'static str {
     }
 }
 
-fn map_rust_type_ts(rust_type: &str) -> &'static str {
+fn map_rust_type_ts(rust_type: &str) -> String {
     let t = rust_type.trim().trim_end_matches(',');
+    if let Some(inner) = unwrap_generic_type(t, "Option") {
+        return format!("{} | null", map_rust_type_ts(inner));
+    }
+    if let Some(inner) = unwrap_generic_type(t, "Vec") {
+        return format!("{}[]", map_rust_type_ts(inner));
+    }
+    if let Some(inner) = t.strip_prefix("&[").and_then(|s| s.strip_suffix(']')) {
+        return format!("{}[]", map_rust_type_ts(inner));
+    }
+    if let Some((key, value)) = unwrap_two_generic_types(t, "HashMap") {
+        return format!("Map<{}, {}>", map_rust_type_ts(key), map_rust_type_ts(value));
+    }
+    if let Some(inner) = unwrap_generic_type(t, "HashSet") {
+        return format!("Set<{}>", map_rust_type_ts(inner));
+    }
+    if let Some(ok_ty) = unwrap_result_ok_type(t) {
+        return map_rust_type_ts(ok_ty);
+    }
     match t {
-        "String" | "&str" => "string",
-        "i32" | "i64" | "u32" | "u64" | "usize" | "isize" | "f32" | "f64" => "number",
-        "bool" => "boolean",
-        "()" => "void",
-        s if s.starts_with("Option<") => "any",
-        s if s.starts_with("Vec<") => "any[]",
-        s if s.starts_with("&[") => "any[]",
-        _ => "any",
+        "String" | "&str" | "str" => "string".to_string(),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" | "isize" | "f32" | "f64" => "number".to_string(),
+        "bool" => "boolean".to_string(),
+        "()" => "void".to_string(),
+        other if other.starts_with('&') => map_rust_type_ts(other.trim_start_matches('&')),
+        other => other.to_string(),
+    }
+}
+
+fn translate_rust_statement_to_ts(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if matches!(trimmed, "{" | "}" | "else {" | "} else {") {
+        return Some(trimmed.to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        return Some(format!("return {};", map_rust_expr_ts(rest)));
+    }
+    if trimmed == "return" {
+        return Some("return;".to_string());
+    }
+    if let Some(expr) = trimmed.strip_prefix("println!") {
+        return Some(format!("console.log{};", map_rust_macro_args_ts(expr)));
+    }
+    if let Some(expr) = trimmed.strip_prefix("eprintln!") {
+        return Some(format!("console.error{};", map_rust_macro_args_ts(expr)));
+    }
+    if trimmed.starts_with("let ") {
+        let without_let = trimmed
+            .trim_start_matches("let ")
+            .trim_start_matches("mut ")
+            .trim();
+        if let Some((name, expr)) = without_let.split_once('=') {
+            let name = name
+                .split(':')
+                .next()
+                .unwrap_or(name)
+                .trim()
+                .trim_start_matches("mut ");
+            return Some(format!("let {} = {};", name, map_rust_expr_ts(expr)));
+        }
+        let name = without_let
+            .split(':')
+            .next()
+            .unwrap_or(without_let)
+            .trim()
+            .trim_start_matches("mut ");
+        return Some(format!("let {};", name));
+    }
+    if trimmed.starts_with("if ") || trimmed.starts_with("while ") {
+        return Some(map_rust_control_flow_to_ts(trimmed));
+    }
+    if trimmed.ends_with(')') || trimmed.ends_with('}') || trimmed.contains('=') {
+        return Some(format!("{};", map_rust_expr_ts(trimmed)));
+    }
+    None
+}
+
+fn map_rust_control_flow_to_ts(line: &str) -> String {
+    let trimmed = line.trim();
+    if let Some(cond) = trimmed.strip_prefix("if ") {
+        return format!("if ({})", map_rust_expr_ts(cond));
+    }
+    if let Some(cond) = trimmed.strip_prefix("while ") {
+        return format!("while ({})", map_rust_expr_ts(cond));
+    }
+    trimmed.to_string()
+}
+
+fn map_rust_expr_ts(expr: &str) -> String {
+    let mut out = expr.trim().trim_end_matches(';').to_string();
+    if out == "None" {
+        return "null".to_string();
+    }
+    if out == "String::new()" {
+        return "\"\"".to_string();
+    }
+    if out == "Vec::new()" {
+        return "[]".to_string();
+    }
+    if out == "HashMap::new()" {
+        return "new Map()".to_string();
+    }
+    if out == "HashSet::new()" {
+        return "new Set()".to_string();
+    }
+    if let Some(inner) = out.strip_prefix("Some(").and_then(|s| s.strip_suffix(')')) {
+        return map_rust_expr_ts(inner);
+    }
+    if let Some(inner) = out.strip_prefix("Ok(").and_then(|s| s.strip_suffix(')')) {
+        return map_rust_expr_ts(inner);
+    }
+    if let Some(inner) = out.strip_prefix("Err(").and_then(|s| s.strip_suffix(')')) {
+        return format!("new Error({})", map_rust_expr_ts(inner));
+    }
+    if let Some(inner) = out
+        .strip_prefix("String::from(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        return map_rust_expr_ts(inner);
+    }
+    if out.starts_with("vec![") && out.ends_with(']') {
+        let inner = &out[5..out.len() - 1];
+        let items = split_top_level_args(inner)
+            .into_iter()
+            .map(|item| map_rust_expr_ts(&item))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("[{}]", items);
+    }
+    if out.starts_with("format!(") {
+        if let Some(template) = map_rust_format_macro_to_ts(&out) {
+            return template;
+        }
+    }
+    out = out.replace("self.", "this.");
+    out = out.replace("::new()", "()");
+    out
+}
+
+fn map_rust_macro_args_ts(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some(inner) = trimmed.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        if let Some(template) = map_rust_format_macro_to_ts(&format!("format!({})", inner)) {
+            return format!("({})", template);
+        }
+        return format!(
+            "({})",
+            split_top_level_args(inner)
+                .into_iter()
+                .map(|arg| map_rust_expr_ts(&arg))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    "()".to_string()
+}
+
+fn map_rust_format_macro_to_ts(expr: &str) -> Option<String> {
+    let inner = expr
+        .trim()
+        .strip_prefix("format!(")?
+        .strip_suffix(')')?
+        .trim();
+    let args = split_top_level_args(inner);
+    if args.is_empty() {
+        return None;
+    }
+    let template = normalize_rust_string_literal(&args[0])?;
+    if args.len() == 2 && template == "\"{}\"" {
+        return Some(map_rust_expr_ts(&args[1]));
+    }
+    let mut literal = template.trim_matches('"').to_string();
+    for replacement in args.iter().skip(1) {
+        if let Some(pos) = literal.find("{}") {
+            literal.replace_range(pos..pos + 2, &format!("${{{}}}", map_rust_expr_ts(replacement)));
+        }
+    }
+    Some(format!("`{}`", literal))
+}
+
+fn normalize_rust_string_literal(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn split_top_level_args(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth_paren = 0i32;
+    let mut depth_angle = 0i32;
+    let mut depth_bracket = 0i32;
+    let mut depth_brace = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut current = String::new();
+
+    for ch in input.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                current.push(ch);
+            }
+            '(' => {
+                depth_paren += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth_paren -= 1;
+                current.push(ch);
+            }
+            '<' => {
+                depth_angle += 1;
+                current.push(ch);
+            }
+            '>' => {
+                depth_angle -= 1;
+                current.push(ch);
+            }
+            '[' => {
+                depth_bracket += 1;
+                current.push(ch);
+            }
+            ']' => {
+                depth_bracket -= 1;
+                current.push(ch);
+            }
+            '{' => {
+                depth_brace += 1;
+                current.push(ch);
+            }
+            '}' => {
+                depth_brace -= 1;
+                current.push(ch);
+            }
+            ',' if depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                let piece = current.trim();
+                if !piece.is_empty() {
+                    out.push(piece.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn unwrap_generic_type<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{}<", name);
+    text.strip_prefix(&prefix)?.strip_suffix('>')
+}
+
+fn unwrap_two_generic_types<'a>(text: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    let inner = unwrap_generic_type(text, name)?;
+    let parts = split_top_level_args(inner);
+    if parts.len() != 2 {
+        return None;
+    }
+    let first = inner.get(..parts[0].len())?.trim();
+    let second = inner.get(parts[0].len() + 1..)?.trim();
+    Some((first, second))
+}
+
+fn unwrap_result_ok_type<'a>(text: &'a str) -> Option<&'a str> {
+    let inner = unwrap_generic_type(text, "Result")?;
+    let parts = split_top_level_args(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    inner.get(..parts[0].len()).map(str::trim)
+}
+
+fn default_ts_value_for_type(ts_type: &str) -> &'static str {
+    match ts_type {
+        "string" => "\"\"",
+        "number" => "0",
+        "boolean" => "false",
+        "void" => "undefined",
+        _ if ts_type.ends_with("[]") => "[]",
+        _ if ts_type.starts_with("Map<") => "new Map()",
+        _ if ts_type.starts_with("Set<") => "new Set()",
+        _ if ts_type.ends_with(" | null") => "null",
+        _ => "undefined",
     }
 }
 
@@ -2260,6 +2567,32 @@ def add(a: int, b: int) -> int:
         assert!(go_code.contains("package main"));
         assert!(go_code.contains("func Greet("));
         assert!(go_code.contains("string"));
+    }
+
+    #[test]
+    fn test_rust_function_to_ts_translates_body() {
+        let rust = r#"pub fn greet(name: &str) -> String {
+    let prefix = String::from("Hello");
+    println!("{}", name);
+    return format!("{}, {}", prefix, name);
+}
+"#;
+        let ts = translate_rust_to_ts(rust);
+        assert!(ts.contains("export function greet(name: string): string"));
+        assert!(ts.contains("let prefix = \"Hello\";"));
+        assert!(ts.contains("console.log(name);"));
+        assert!(ts.contains("return `${prefix}, ${name}`;"));
+        assert!(!ts.contains("// TODO"));
+    }
+
+    #[test]
+    fn test_rust_type_mapping_handles_collections_and_option() {
+        assert_eq!(map_rust_type_ts("Vec<String>"), "string[]");
+        assert_eq!(map_rust_type_ts("Option<i64>"), "number | null");
+        assert_eq!(
+            map_rust_type_ts("HashMap<String, Vec<i32>>"),
+            "Map<string, number[]>"
+        );
     }
 
     #[test]
