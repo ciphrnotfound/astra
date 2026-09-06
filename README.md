@@ -111,9 +111,45 @@ astra "what is the most dangerous file in this codebase"
 # Time travel debug
 astra :bisect "when did the payment bug get introduced"
 
+# Capture a bug, tie it to Git evidence, and queue a verified fix
+astra :fix-bug "checkout returns 500 when the card is expired"
+astra :issues
+astra :issue astra-issue-<id>
+
 # Migrate to another language
 astra migrate --from typescript --to rust
 ```
+
+---
+
+## Codex + Claude Code + Cursor coworker mode
+
+Astra can be the persistent project brain while multiple coding agents act as workers. Configure all three project-scoped MCP clients in one step:
+
+```text
+:cowork init
+```
+
+Then queue work without launching it accidentally:
+
+```text
+:delegate codex implement OAuth login with tests
+:delegate claude review the checkout architecture
+:delegate cursor build the settings UI
+:jobs
+```
+
+To explicitly launch an installed headless worker CLI, use `:dispatch`:
+
+```text
+:dispatch codex fix the flaky authentication tests
+```
+
+Workers share compact context, durable project decisions, job state, changed-file reports, and verification evidence through Astra MCP. Source files and full chat transcripts are not copied into memory.
+
+## Issue-to-fix workflow
+
+Use `:fix-bug` when the input is a bug report rather than a known file edit. Astra records the report under `.astra/issues`, captures the current Git HEAD and branch, finds likely files and recent commit evidence, and creates a cowork job with a hard reproduction gate. No production file is changed during intake. A Codex, Claude Code, Cursor, or other MCP worker must first create a failing regression test or replay command, then implement and verify the fix. Use `:issue <id>` or the `astra_issue_status` MCP tool to inspect the evidence and worker state.
 
 ---
 

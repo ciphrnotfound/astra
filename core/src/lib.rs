@@ -33,3 +33,5 @@ pub mod planner;
 pub mod devops;
 pub mod pm;
 pub mod review;
+pub mod coworker;
+pub mod issues;

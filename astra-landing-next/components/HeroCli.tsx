@@ -8,7 +8,7 @@ interface Message {
   content: string;
 }
 
-const CONVERSATION_SEQUENCES = [
+const CONVERSATION_SEQUENCES: Message[][] = [
   [
     { type: 'user', content: 'astra "why did we switch to GraphQL?"' },
     { type: 'system', content: 'Analyzing git history...' },

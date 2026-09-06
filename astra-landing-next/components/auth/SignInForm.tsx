@@ -20,6 +20,7 @@ export default function SignInForm() {
         no_email: 'Could not retrieve email from GitHub account',
         user_creation_failed: 'Failed to create user account',
         auth_failed: 'Authentication failed. Please try again.',
+        auth_unavailable: 'Sign-in is temporarily unavailable. Please try again shortly.',
       };
       setError(errorMessages[errorParam] || 'An error occurred during sign in');
     }

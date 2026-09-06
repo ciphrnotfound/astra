@@ -117,6 +117,13 @@ impl GitRepo {
         }
     }
 
+    pub fn current_branch(&self) -> Option<String> {
+        self.repo
+            .head()
+            .ok()
+            .and_then(|head| head.shorthand().map(str::to_string))
+    }
+
     pub fn get_diff_stats(&self, from_commit: &str) -> Result<(usize, usize)> {
         let output = Command::new("git")
             .current_dir(&self.root)

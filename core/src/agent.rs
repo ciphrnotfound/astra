@@ -11,6 +11,7 @@ use crate::tools::{self, ToolCall, ToolResult};
 /// Maximum iterations before the agent loop is forcefully stopped.
 const MAX_ITERATIONS: usize = 50;
 const CONTEXT_TAIL_MESSAGES: usize = 10;
+const ITERATION_DELAY_MS: u64 = 350;
 
 /// A message in the agent conversation.
 #[derive(Clone, Debug)]
@@ -36,6 +37,40 @@ impl Default for AgentConfig {
     }
 }
 
+#[derive(Default)]
+struct AgentProgress {
+    evidence_calls: usize,
+    successful_calls: usize,
+    mutation_revision: usize,
+    verified_revision: usize,
+}
+
+impl AgentProgress {
+    fn observe(&mut self, call: &ToolCall, result: &ToolResult) {
+        if !result.success {
+            return;
+        }
+
+        self.successful_calls += 1;
+        if is_evidence_tool(&call.name) {
+            self.evidence_calls += 1;
+        }
+        if is_mutating_tool(&call.name) {
+            self.mutation_revision += 1;
+        } else if is_verification_tool(&call.name) && self.mutation_revision > 0 {
+            self.verified_revision = self.mutation_revision;
+        }
+    }
+
+    fn has_evidence(&self) -> bool {
+        self.evidence_calls > 0
+    }
+
+    fn has_unverified_mutation(&self) -> bool {
+        self.mutation_revision > self.verified_revision
+    }
+}
+
 /// Run the agentic tool-use loop.
 ///
 /// The agent sends the user's task to the LLM along with tool definitions.
@@ -50,20 +85,21 @@ pub fn run_agent_loop(
     system_context: &str,
     searcher: Option<&dyn SearchProvider>,
 ) -> Result<String> {
-    // Build a compact system prompt with tools
+    // Build a compact system prompt with tools.
     let tools_block = tools::tools_prompt_block();
     let system = format!(
-        "{}\n\n{}\n\nRules (CRACKED SENIOR ENGINEER MODE):\n\
-        1. REASON: Calibrate your thoughts first. Use `reason` to plan architecture.\n\
-        2. NO PLACEHOLDERS: NEVER use `// rest of code here` or lazy placeholders. Write complete, production-ready code with full implementations. If writing a file, write the WHOLE file.\n\
-        3. PATHS: Never assume where a file is. If `read_file` fails, use `search_codebase` or `list_dir` to find the correct path.\n\
-        4. FOLDERS vs FILES: Only use `create_dir` for FOLDERS. For files, rely on `write_file` (creates parents automatically).\n\
-        5. EFFICIENCY: Minimize model calls by batching multiple independent tool calls into one JSON response when possible.\n\
-        6. EXCELLENCE: Write expert-level, highly-optimized, properly typed and error-handled code. Do not skip edge cases.\n\
-        7. IMPLEMENT: Use JSON `tool_calls` for all actions.\n\
-        8. FINAL CHECK: Before giving a final response, ensure no recent tool call failed. If a tool failed, fix it first.\n\n\
+        "{}\n\n{}\n\nStaff engineer operating rules:\n\
+        1. UNDERSTAND FIRST: Inspect the relevant files, structure, and constraints before proposing or changing code. Never act from filenames or assumptions alone.\n\
+        2. THINK IN OUTCOMES: Translate the request into concrete acceptance criteria, identify risks, and use `reason` for genuinely complex decisions.\n\
+        3. GROUND EVERY CLAIM: Treat tool output as evidence. Distinguish verified facts, reasonable inferences, and unknowns. Never claim a command ran or a change works unless a tool result proves it.\n\
+        4. PRESERVE USER WORK: Make the smallest coherent change, respect existing conventions, and do not overwrite unrelated work.\n\
+        5. COMPLETE IMPLEMENTATIONS: Do not leave placeholders, commented-out implementations, or `rest of code` omissions. Handle relevant errors and edge cases.\n\
+        6. PATHS: Never assume where a file is. If a read fails, search or list directories to resolve the real path. Use `create_dir` only for directories; `write_file` creates file parents.\n\
+        7. VERIFY AFTER CHANGES: After the final mutation, inspect the result and run the narrowest meaningful test, build, or validation command available. Fix failures before finalizing.\n\
+        8. EFFICIENCY: Batch independent read-only tool calls. Keep sequential dependencies ordered.\n\
+        9. FINISH HONESTLY: Lead the final answer with the outcome, cite files or checks used, and state any remaining limitation without pretending completion.\n\
+        10. ACTION FORMAT: Use JSON `tool_calls` for actions. Plain text means you are finished.\n\n\
         Example Turn:\n\
-        PLAN: I will find the main file first.\n\
         {{\"tool_calls\": [{{\"name\": \"search_codebase\", \"arguments\": {{\"pattern\": \"main.py\"}}}}]}}\n",
         system_context, tools_block
     );
@@ -74,19 +110,27 @@ pub fn run_agent_loop(
     ];
 
     let mut iteration = 0;
+    let mut progress = AgentProgress::default();
 
     loop {
         iteration += 1;
         if iteration > config.max_iterations {
             return Ok(format!(
-                "⚠️ Agent stopped after {} iterations. Here's what was accomplished so far.",
-                config.max_iterations
+                "Agent stopped after {} iterations before it could finish safely. Successful tool calls: {}.{}",
+                config.max_iterations,
+                progress.successful_calls,
+                if progress.has_unverified_mutation() {
+                    " The latest filesystem changes are not yet verified."
+                } else {
+                    ""
+                }
             ));
         }
 
-        // Add a delay between iterations to avoid rate limiting
+        // Provider implementations already apply their own rate limits. Keep a
+        // short pause without adding four seconds to every tool iteration.
         if iteration > 1 {
-            thread::sleep(Duration::from_millis(4000));
+            thread::sleep(Duration::from_millis(ITERATION_DELAY_MS));
         }
 
         trim_conversation(&mut conversation, CONTEXT_TAIL_MESSAGES);
@@ -101,7 +145,11 @@ pub fn run_agent_loop(
         // Try to parse tool calls from the response
         if let Some(tool_calls) = parse_tool_calls(&trimmed) {
             for call in &tool_calls {
-                eprintln!("  🔧 Calling tool: {} {:?}", call.name, summarize_args(&call.arguments));
+                eprintln!(
+                    "  🔧 Calling tool: {} {:?}",
+                    call.name,
+                    summarize_args(&call.arguments)
+                );
             }
 
             let mut results = Vec::new();
@@ -110,8 +158,13 @@ pub fn run_agent_loop(
                 if result.success {
                     eprintln!("  ✅ {} succeeded", result.tool_name);
                 } else {
-                    eprintln!("  ❌ {} failed: {}", result.tool_name, &result.output[..result.output.len().min(200)]);
+                    eprintln!(
+                        "  ❌ {} failed: {}",
+                        result.tool_name,
+                        &result.output[..result.output.len().min(200)]
+                    );
                 }
+                progress.observe(call, &result);
                 results.push(result);
             }
 
@@ -123,11 +176,25 @@ pub fn run_agent_loop(
             conversation.push(AgentMessage::Assistant(trimmed));
             conversation.push(AgentMessage::User("Error: Your last response contained malformed JSON tool calls. Please fix the formatting (ensure all quotes are closed and keys are correct) and try again. Respond ONLY with the valid JSON block.".to_string()));
         } else {
-            if has_recent_tool_error(&conversation) {
+            if latest_tool_batch_has_error(&conversation) {
                 eprintln!("  ⚠️  Final response blocked because recent tool calls failed.");
                 conversation.push(AgentMessage::Assistant(trimmed));
                 conversation.push(AgentMessage::User(
                     "A recent tool call failed. Do not finalize yet. Diagnose the failure, call the required tools to fix it, and only then provide the final answer.".to_string(),
+                ));
+                continue;
+            }
+            if !progress.has_evidence() {
+                conversation.push(AgentMessage::Assistant(trimmed));
+                conversation.push(AgentMessage::User(
+                    "You have not inspected project evidence yet. Before finalizing, use read_file, list_dir, search_codebase, run_command, or another evidence tool to ground the answer in the actual repository.".to_string(),
+                ));
+                continue;
+            }
+            if progress.has_unverified_mutation() {
+                conversation.push(AgentMessage::Assistant(trimmed));
+                conversation.push(AgentMessage::User(
+                    "The latest filesystem change has not been verified. Inspect the final state and run the narrowest meaningful validation (test, build, formatter, compiler, or targeted check) before finalizing.".to_string(),
                 ));
                 continue;
             }
@@ -316,15 +383,47 @@ fn trim_conversation(conversation: &mut Vec<AgentMessage>, keep_last: usize) {
     conversation.extend(tail);
 }
 
-fn has_recent_tool_error(conversation: &[AgentMessage]) -> bool {
+fn latest_tool_batch_has_error(conversation: &[AgentMessage]) -> bool {
     conversation
         .iter()
         .rev()
-        .take(8)
-        .any(|msg| match msg {
-            AgentMessage::ToolResults(results) => results.iter().any(|r| !r.success),
-            _ => false,
+        .find_map(|msg| match msg {
+            AgentMessage::ToolResults(results) => {
+                Some(results.iter().any(|result| !result.success))
+            }
+            _ => None,
         })
+        .unwrap_or(false)
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "delete_file" | "create_dir" | "delete_dir" | "move_path"
+    )
+}
+
+fn is_evidence_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "inspect_project"
+            | "read_file"
+            | "list_dir"
+            | "search_codebase"
+            | "run_command"
+            | "research_web"
+            | "get_file_owners"
+            | "get_hidden_coupling"
+            | "get_file_timeline"
+            | "get_semantic_concepts"
+    )
+}
+
+fn is_verification_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "list_dir" | "search_codebase" | "run_command"
+    )
 }
 
 /// Safely truncate a string to a maximum byte length without breaking UTF-8 character boundaries.
@@ -337,5 +436,56 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
             end -= 1;
         }
         &s[..end]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{latest_tool_batch_has_error, AgentMessage, AgentProgress};
+    use crate::tools::{ToolCall, ToolResult};
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    fn result(name: &str, success: bool) -> ToolResult {
+        ToolResult {
+            tool_name: name.to_string(),
+            success,
+            output: String::new(),
+        }
+    }
+
+    #[test]
+    fn mutation_requires_later_verification() {
+        let mut progress = AgentProgress::default();
+        progress.observe(&call("read_file"), &result("read_file", true));
+        progress.observe(&call("edit_file"), &result("edit_file", true));
+        assert!(progress.has_evidence());
+        assert!(progress.has_unverified_mutation());
+
+        progress.observe(&call("run_command"), &result("run_command", true));
+        assert!(!progress.has_unverified_mutation());
+    }
+
+    #[test]
+    fn reasoning_alone_is_not_project_evidence() {
+        let mut progress = AgentProgress::default();
+        progress.observe(&call("reason"), &result("reason", true));
+        assert!(!progress.has_evidence());
+    }
+
+    #[test]
+    fn a_successful_retry_resolves_an_older_tool_error() {
+        let conversation = vec![
+            AgentMessage::ToolResults(vec![result("run_command", false)]),
+            AgentMessage::Assistant("retrying".to_string()),
+            AgentMessage::ToolResults(vec![result("run_command", true)]),
+        ];
+
+        assert!(!latest_tool_batch_has_error(&conversation));
     }
 }

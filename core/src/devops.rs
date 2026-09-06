@@ -122,7 +122,116 @@ Rules:
         truncate_diff(diff)
     );
     let msg = model.complete(&prompt)?;
-    Ok(strip_fences(&msg))
+    Ok(clean_commit_message(&msg))
+}
+
+/// Extract a real Conventional Commit message from a possibly-chatty LLM reply.
+///
+/// Small models often wrap the message in preamble ("Here's a clean commit
+/// message:"), backticks, and trailing explanation. We keep only the actual
+/// commit: the first `type(scope): summary` line and any bullet body that
+/// immediately follows, dropping everything else.
+fn clean_commit_message(raw: &str) -> String {
+    let stripped = strip_fences(raw);
+    let types = [
+        "feat", "fix", "chore", "refactor", "docs", "test", "perf", "build", "ci", "style", "revert",
+    ];
+
+    let is_subject = |line: &str| -> bool {
+        let l = line.trim().trim_start_matches('`').trim();
+        types.iter().any(|t| {
+            l.starts_with(&format!("{}:", t)) || l.starts_with(&format!("{}(", t))
+        })
+    };
+
+    let lines: Vec<&str> = stripped.lines().collect();
+
+    // Find the first line that looks like a conventional-commit subject.
+    let start = lines.iter().position(|l| is_subject(l));
+
+    let Some(start) = start else {
+        // No conventional subject found — fall back to the first non-empty,
+        // non-preamble line, capped at 72 chars.
+        let first = stripped
+            .lines()
+            .map(|l| l.trim().trim_matches('`').trim())
+            .find(|l| !l.is_empty() && !l.to_ascii_lowercase().contains("commit message"))
+            .unwrap_or("chore: update");
+        return truncate_subject(first);
+    };
+
+    // Subject line, cleaned of surrounding backticks.
+    let subject = truncate_subject(lines[start].trim().trim_matches('`').trim());
+
+    // Collect a bullet body that immediately follows (blank line then `- ...`),
+    // stopping at the first line that reads like prose explanation.
+    let mut body: Vec<String> = Vec::new();
+    for line in lines.iter().skip(start + 1) {
+        let t = line.trim();
+        if t.is_empty() {
+            if body.is_empty() {
+                continue; // allow the blank line between subject and body
+            } else {
+                break; // blank line after body ends it
+            }
+        }
+        if t.starts_with('-') || t.starts_with('*') {
+            body.push(format!("- {}", t.trim_start_matches(['-', '*', ' '])));
+        } else {
+            // Prose / explanation ("This commit message follows…") — stop.
+            break;
+        }
+    }
+
+    if body.is_empty() {
+        subject
+    } else {
+        format!("{}\n\n{}", subject, body.join("\n"))
+    }
+}
+
+fn truncate_subject(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= 72 {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(72).collect();
+        truncated
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preview — draft what WOULD be shipped, without changing anything
+// ---------------------------------------------------------------------------
+
+pub struct ShipPreview {
+    pub message: String,
+    pub branch: String,
+    pub files: Vec<String>,
+    pub has_remote: bool,
+}
+
+/// Draft the commit message and list what would be pushed — no git writes.
+pub fn preview(root: &Path, model: &dyn CodexModel) -> Result<ShipPreview> {
+    let state = inspect(root)?;
+    if !state.has_changes {
+        return Err(anyhow!("Nothing to ship — working tree is clean."));
+    }
+    // Diff = staged + unstaged, so the preview reflects everything `:ship` will stage.
+    let combined = format!("{}\n{}", state.staged_diff, state.unstaged_diff);
+    let message = draft_commit_message(model, &combined, &state.status_short)?;
+    let files: Vec<String> = state
+        .status_short
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(ShipPreview {
+        message,
+        branch: state.branch,
+        files,
+        has_remote: state.has_remote,
+    })
 }
 
 // ---------------------------------------------------------------------------

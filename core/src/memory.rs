@@ -1,13 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model::EmbeddingProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use crate::git::GitRepo;
-use crate::model::EmbeddingProvider;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LearningPhase {
@@ -97,7 +96,47 @@ fn now_secs() -> u64 {
 }
 
 fn default_max_entries() -> usize {
-    0 // 0 denotes infinite entries
+    512
+}
+
+const DEFAULT_ENTRY_LIMIT: usize = 1_200;
+const EPISODIC_ENTRY_LIMIT: usize = 700;
+const SOURCE_DOCUMENT_LIMIT: usize = 2_400;
+
+fn entry_content_limit(kind: &str) -> usize {
+    match kind {
+        "qa" | "qa-memory" | "web-search" | "web-knowledge" | "autonomous-action" => {
+            EPISODIC_ENTRY_LIMIT
+        }
+        "source-doc" => SOURCE_DOCUMENT_LIMIT,
+        _ => DEFAULT_ENTRY_LIMIT,
+    }
+}
+
+fn per_kind_limit(kind: &str) -> Option<usize> {
+    match kind {
+        // These are useful only for immediate continuity. Keeping them forever
+        // makes startup, retrieval, and prompt construction progressively slower.
+        "qa" | "qa-memory" => Some(6),
+        "web-search" | "web-knowledge" => Some(3),
+        "autonomous-action" | "orchestrator-delegated" | "orchestrator-result" => Some(12),
+        "cowork-job" | "cowork-result" => Some(24),
+        "task-execution" => Some(16),
+        "rag-search" => Some(8),
+        "source-doc" => Some(8),
+        "git-commit" => Some(80),
+        _ => None,
+    }
+}
+
+fn compact_stored_content(kind: &str, content: &mut String) -> bool {
+    let limit = entry_content_limit(kind);
+    if content.chars().count() <= limit {
+        return false;
+    }
+    *content = content.chars().take(limit).collect::<String>();
+    content.push_str("... [TRUNCATED]");
+    true
 }
 
 impl MemoryStore {
@@ -113,7 +152,15 @@ impl MemoryStore {
             max_entries: default_max_entries(),
             global: None,
         };
+        let loaded_count = store.entries.len();
+        let mut content_compacted = false;
+        for entry in &mut store.entries {
+            content_compacted |= compact_stored_content(&entry.kind, &mut entry.content);
+        }
         store.trim_to_max();
+        if content_compacted || store.entries.len() != loaded_count {
+            let _ = store.save();
+        }
         store
     }
 
@@ -124,9 +171,7 @@ impl MemoryStore {
 
     /// Returns the global memory path: ~/.astra/memory.json
     pub fn global_memory_path() -> Option<PathBuf> {
-        let home = env::var("HOME")
-            .or_else(|_| env::var("USERPROFILE"))
-            .ok()?;
+        let home = env::var("HOME").or_else(|_| env::var("USERPROFILE")).ok()?;
         Some(PathBuf::from(home).join(".astra").join("memory.json"))
     }
 
@@ -160,7 +205,12 @@ impl MemoryStore {
             return Some(name);
         }
         if let Some(global) = &self.global {
-            if let Some(entry) = global.entries.iter().rev().find(|e| e.kind == "user-identity") {
+            if let Some(entry) = global
+                .entries
+                .iter()
+                .rev()
+                .find(|e| e.kind == "user-identity")
+            {
                 if let Some(name) = entry.content.strip_prefix("name: ") {
                     return Some(name.to_string());
                 }
@@ -245,6 +295,36 @@ impl MemoryStore {
 
     pub fn remember_conversation_state(&mut self, key: &str, value: &str) {
         self.upsert_local_keyed("conversation-state", key, value);
+    }
+
+    /// Fetch one small keyed state value without running a relevance search.
+    pub fn conversation_state(&self, key: &str) -> Option<String> {
+        let wanted = key.trim().to_ascii_lowercase();
+        self.entries.iter().rev().find_map(|entry| {
+            if entry.kind != "conversation-state" {
+                return None;
+            }
+            parse_key_value(&entry.content).and_then(|(entry_key, value)| {
+                (entry_key == wanted).then_some(value)
+            })
+        })
+    }
+
+    /// Remove transient state after its follow-up has been handled.
+    pub fn clear_conversation_state(&mut self, key: &str) -> bool {
+        let wanted = key.trim().to_ascii_lowercase();
+        let before = self.entries.len();
+        self.entries.retain(|entry| {
+            entry.kind != "conversation-state"
+                || parse_key_value(&entry.content)
+                    .map(|(entry_key, _)| entry_key != wanted)
+                    .unwrap_or(true)
+        });
+        let changed = self.entries.len() != before;
+        if changed {
+            let _ = self.save();
+        }
+        changed
     }
 
     pub fn user_facts(&self) -> Vec<(String, String)> {
@@ -332,10 +412,7 @@ impl MemoryStore {
     }
 
     pub fn add(&mut self, kind: &str, mut content: String) {
-        if content.len() > 5000 {
-            content = content.chars().take(5000).collect::<String>();
-            content.push_str("... [TRUNCATED]");
-        }
+        compact_stored_content(kind, &mut content);
         self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
@@ -346,10 +423,7 @@ impl MemoryStore {
     }
 
     pub fn add_event(&mut self, kind: &str, mut content: String, event: MemoryEvent) {
-        if content.len() > 5000 {
-            content = content.chars().take(5000).collect::<String>();
-            content.push_str("... [TRUNCATED]");
-        }
+        compact_stored_content(kind, &mut content);
         self.push_entry(MemoryEntry {
             kind: kind.to_string(),
             content,
@@ -380,7 +454,12 @@ impl MemoryStore {
             .collect()
     }
 
-    pub fn search(&self, query: &str, query_embedding: Option<&[f32]>, limit: usize) -> Vec<MemoryEntry> {
+    pub fn search(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Vec<MemoryEntry> {
         let trimmed = query.trim().to_ascii_lowercase();
         if trimmed.is_empty() {
             return Vec::new();
@@ -396,9 +475,9 @@ impl MemoryStore {
 
         // Tokenize query, skipping common stop words
         let stop_words = [
-            "what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did",
-            "how", "why", "where", "to", "of", "in", "at", "with", "and", "or", "me", "you",
-            "we", "this", "that",
+            "what", "is", "my", "the", "a", "an", "for", "from", "now", "on", "was", "did", "how",
+            "why", "where", "to", "of", "in", "at", "with", "and", "or", "me", "you", "we", "this",
+            "that",
         ];
         let query_tokens: Vec<&str> = trimmed
             .split_whitespace()
@@ -414,65 +493,94 @@ impl MemoryStore {
             for entry in all_entries.iter().rev() {
                 if entry.content.to_ascii_lowercase().contains(&needle) {
                     matches.push((*entry).clone());
-                    if matches.len() >= limit { break; }
+                    if matches.len() >= limit {
+                        break;
+                    }
                 }
             }
             return matches;
         }
 
-        // Rank by match count OR cosine similarity
-        let mut scored_matches: Vec<(f32, MemoryEntry)> = all_entries.iter().rev().map(|entry| {
-            let mut score = 0.0;
-            let content_lower = entry.content.to_ascii_lowercase();
+        // Rank by actual relevance first, then use recency and memory type only
+        // as tie-breakers. Previously every recent entry received a positive
+        // score even with zero query overlap, which surfaced unrelated memories.
+        let mut scored_matches: Vec<(f32, MemoryEntry)> = all_entries
+            .iter()
+            .rev()
+            .map(|entry| {
+                let mut relevance = 0.0;
+                let content_lower = entry.content.to_ascii_lowercase();
 
-            let age_secs = now.saturating_sub(entry.timestamp);
-            let age_days = (age_secs / 86_400) as f32;
-            let recency_boost = 0.25 / (1.0 + (age_days / 14.0));
-            score += recency_boost;
-            
-            // Keyword match
-            for token in &query_tokens {
-                if content_lower.contains(token) {
-                    score += 0.2; // base score for keywords
-                }
-            }
-            if entry.kind == "user-identity" || entry.kind == "user-preference" || entry.kind == "project-fact" || entry.kind == "fact" {
-                score += 0.5;
-            }
-            if entry.kind == "style-memory" {
-                score += 0.35;
-            }
-            if entry.kind == "conversation-state" {
-                score += 0.4;
-            }
-
-            if let Some((key, value)) = parse_key_value(&entry.content) {
+                // Keyword match
                 for token in &query_tokens {
-                    if key == *token {
-                        score += 0.6;
-                    } else if value.to_ascii_lowercase().contains(token) {
-                        score += 0.25;
+                    if content_lower.contains(token) {
+                        relevance += 0.2;
                     }
                 }
-            }
 
-            // Vector match
-            if let Some(q_vec) = query_embedding {
-                if let Some(entry_vec) = &entry.embedding {
-                    let sim = cosine_similarity(q_vec, entry_vec);
-                    if sim > 0.6 {
-                        score += sim; // boost significantly
+                if let Some((key, value)) = parse_key_value(&entry.content) {
+                    for token in &query_tokens {
+                        if key == *token {
+                            relevance += 0.6;
+                        } else if value.to_ascii_lowercase().contains(token) {
+                            relevance += 0.25;
+                        }
                     }
                 }
-            }
 
-            (score, (*entry).clone())
-        }).filter(|(score, _)| *score > 0.0).collect();
+                // Vector match
+                if let Some(q_vec) = query_embedding {
+                    if let Some(entry_vec) = &entry.embedding {
+                        let sim = cosine_similarity(q_vec, entry_vec);
+                        if sim > 0.6 {
+                            relevance += sim;
+                        }
+                    }
+                }
+
+                if relevance == 0.0 {
+                    return (0.0, (*entry).clone());
+                }
+
+                let age_secs = now.saturating_sub(entry.timestamp);
+                let age_days = (age_secs / 86_400) as f32;
+                let recency_boost = 0.25 / (1.0 + (age_days / 14.0));
+                let kind_boost = match entry.kind.as_str() {
+                    "user-identity" | "user-preference" | "project-fact" | "fact" => 0.5,
+                    "conversation-state" => 0.4,
+                    "style-memory" => 0.35,
+                    _ => 0.0,
+                };
+                let score = relevance + recency_boost + kind_boost;
+                (score, (*entry).clone())
+            })
+            .filter(|(score, _)| *score > 0.0)
+            .collect();
 
         // Sort by score (descending)
         scored_matches.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        scored_matches.into_iter().take(limit).map(|(_, e)| e).collect()
+        scored_matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, e)| e)
+            .collect()
+    }
+
+    /// Return a small, prompt-ready set of relevant memories. Durable storage
+    /// can be richer than the context sent to a model on a single turn.
+    pub fn context(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        max_entries: usize,
+        char_budget: usize,
+    ) -> Vec<MemoryEntry> {
+        compact_for_context(
+            &self.search(query, query_embedding, max_entries.saturating_mul(2)),
+            max_entries,
+            char_budget,
+        )
     }
 
     /// Iterates over all memories without embeddings and calls the Gemini API to get them.
@@ -480,7 +588,7 @@ impl MemoryStore {
     pub fn embed_all(&mut self, embedder: &dyn EmbeddingProvider) {
         let mut updated = false;
         let mut count = 0;
-        
+
         // Reverse because we want to embed the newest memories first
         for entry in self.entries.iter_mut().rev() {
             if entry.embedding.is_none() && entry.content.len() > 10 {
@@ -488,7 +596,8 @@ impl MemoryStore {
                     entry.embedding = Some(vec);
                     updated = true;
                     count += 1;
-                    if count >= 1 { // batch size limit to 1 so we don't block the REPL
+                    if count >= 1 {
+                        // batch size limit to 1 so we don't block the REPL
                         break;
                     }
                 }
@@ -501,10 +610,12 @@ impl MemoryStore {
 
     pub fn compact_noise(&mut self) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|entry| !matches!(
-            entry.kind.as_str(),
-            "qa" | "qa-memory" | "web-search" | "web-knowledge" | "autonomous-action"
-        ));
+        self.entries.retain(|entry| {
+            !matches!(
+                entry.kind.as_str(),
+                "qa" | "qa-memory" | "web-search" | "web-knowledge" | "autonomous-action"
+            )
+        });
         let removed = before.saturating_sub(self.entries.len());
         if removed > 0 {
             let _ = self.save();
@@ -522,10 +633,28 @@ impl MemoryStore {
     }
 
     fn trim_to_max(&mut self) {
-        if self.max_entries == 0 {
-            return;
+        let mut per_kind_seen: HashMap<&str, usize> = HashMap::new();
+        let mut keep_indexes = HashSet::new();
+
+        for (index, entry) in self.entries.iter().enumerate().rev() {
+            let seen = per_kind_seen.entry(entry.kind.as_str()).or_default();
+            let limit = per_kind_limit(&entry.kind).unwrap_or(usize::MAX);
+            if *seen < limit {
+                keep_indexes.insert(index);
+                *seen += 1;
+            }
         }
-        if self.entries.len() > self.max_entries {
+
+        if keep_indexes.len() != self.entries.len() {
+            self.entries = self
+                .entries
+                .drain(..)
+                .enumerate()
+                .filter_map(|(index, entry)| keep_indexes.contains(&index).then_some(entry))
+                .collect();
+        }
+
+        if self.max_entries > 0 && self.entries.len() > self.max_entries {
             let excess = self.entries.len() - self.max_entries;
             self.entries.drain(0..excess);
         }
@@ -533,9 +662,11 @@ impl MemoryStore {
 
     fn is_duplicate_of_last(&self, entry: &MemoryEntry) -> bool {
         match self.entries.last() {
-            Some(last) => last.kind == entry.kind
-                && last.content == entry.content
-                && last.event == entry.event,
+            Some(last) => {
+                last.kind == entry.kind
+                    && last.content == entry.content
+                    && last.event == entry.event
+            }
             None => false,
         }
     }
@@ -594,6 +725,42 @@ impl MemoryStore {
     }
 }
 
+/// Truncate retrieved entries to a strict character budget without breaking
+/// UTF-8 boundaries. The result is optimized for prompt injection, not display.
+pub fn compact_for_context(
+    entries: &[MemoryEntry],
+    max_entries: usize,
+    char_budget: usize,
+) -> Vec<MemoryEntry> {
+    let mut selected = Vec::new();
+    let mut remaining = char_budget;
+
+    for entry in entries.iter().take(max_entries) {
+        if remaining == 0 {
+            break;
+        }
+        let overhead = entry.kind.chars().count() + 6;
+        if remaining <= overhead {
+            break;
+        }
+
+        let content_budget = remaining - overhead;
+        if content_budget <= 16 {
+            break;
+        }
+        let mut compact = entry.clone();
+        if compact.content.chars().count() > content_budget {
+            let keep = content_budget.saturating_sub(16);
+            compact.content = compact.content.chars().take(keep).collect();
+            compact.content.push_str("... [truncated]");
+        }
+        remaining = remaining.saturating_sub(overhead + compact.content.chars().count());
+        selected.push(compact);
+    }
+
+    selected
+}
+
 fn parse_key_value(content: &str) -> Option<(String, String)> {
     let (key, value) = content.split_once(':')?;
     let key = key.trim().to_ascii_lowercase();
@@ -623,6 +790,81 @@ fn dedupe_keyed_pairs(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = seen.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_for_context, MemoryStore};
+
+    #[test]
+    fn search_excludes_recent_but_unrelated_memories() {
+        let mut memory = MemoryStore::default();
+        memory.add("project-fact", "database: postgres".to_string());
+        memory.add("project-fact", "deployment: fly.io".to_string());
+
+        let results = memory.search("how does authentication work", None, 10);
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_prefers_keyed_relevant_memory() {
+        let mut memory = MemoryStore::default();
+        memory.add("project-fact", "database: postgres".to_string());
+        memory.add(
+            "project-fact",
+            "authentication: oauth with rotating sessions".to_string(),
+        );
+
+        let results = memory.search("explain authentication sessions", None, 10);
+
+        assert_eq!(
+            results.first().map(|entry| entry.content.as_str()),
+            Some("authentication: oauth with rotating sessions")
+        );
+        assert!(results
+            .iter()
+            .all(|entry| !entry.content.contains("postgres")));
+    }
+
+    #[test]
+    fn episodic_history_is_capped_while_durable_facts_remain() {
+        let mut memory = MemoryStore::default();
+        memory.add("project-fact", "database: postgres".to_string());
+        for index in 0..12 {
+            memory.add("qa", format!("Q: question {index}\nA: answer {index}"));
+        }
+
+        let qa_count = memory
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "qa")
+            .count();
+        assert_eq!(qa_count, 6);
+        assert!(memory
+            .entries
+            .iter()
+            .any(|entry| entry.content == "database: postgres"));
+    }
+
+    #[test]
+    fn prompt_context_respects_entry_and_character_budgets() {
+        let mut memory = MemoryStore::default();
+        memory.add(
+            "project-fact",
+            "authentication: oauth with rotating sessions".to_string(),
+        );
+        memory.add(
+            "project-fact",
+            "authentication-notes: ".to_string() + &"x".repeat(400),
+        );
+
+        let candidates = memory.search("authentication", None, 10);
+        let compact = compact_for_context(&candidates, 1, 80);
+
+        assert_eq!(compact.len(), 1);
+        assert!(compact[0].content.chars().count() < 80);
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

@@ -284,13 +284,15 @@ fn main() -> Result<()> {
         std::env::set_var("GROQ_API_KEY", &byok_key);
         let groq = GroqModel::from_env(persona.model.clone())?;
         engine.set_model(Box::new(groq));
-        println!(
-            "Using persona BYOK model {} for LLM features.",
-            persona
-                .model
-                .clone()
-                .unwrap_or_else(|| "llama-3.1-8b-instant".to_string())
-        );
+        if !args.mcp {
+            println!(
+                "Using persona BYOK model {} for LLM features.",
+                persona
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| astra_core::model::DEFAULT_GROQ_MODEL.to_string())
+            );
+        }
     } else if let Some(ollama_url) = std::env::var("OLLAMA_URL").ok().or(args.ollama_url.clone()) {
         let model = args.ollama_model.clone().or_else(|| std::env::var("OLLAMA_MODEL").ok());
         let ollama = OllamaModel::from_env(model, Some(ollama_url))?;
@@ -310,7 +312,7 @@ fn main() -> Result<()> {
         let gemini = GeminiModel::from_env(model_name)?;
         
         let groq_fallback: Option<Box<dyn astra_core::model::CodexModel + Send + Sync>> = GroqModel::from_env(None).ok().map(|g| Box::new(g) as Box<dyn astra_core::model::CodexModel + Send + Sync>);
-        if groq_fallback.is_some() {
+        if groq_fallback.is_some() && !args.mcp {
             println!("  {} Groq fallback ready (activates seamlessly if Gemini errors)", "⚡".bold());
         }
 
@@ -333,22 +335,24 @@ fn main() -> Result<()> {
         }
     }
 
-    // Show a quick status if we've already indexed this project
-    let stats = engine.index().stats();
-    if stats.file_count > 0 {
-        println!(
-            "{} project {} ({} files, {} lines indexed).",
-            "astra ▸".blue().bold(),
-            "resumed".green(),
-            stats.file_count,
-            stats.total_lines
-        );
-    } else {
-        println!(
-            "{} New project detected. Run {} to start tracking.",
-            "astra ▸".blue().bold(),
-            "astra --index".bold()
-        );
+    // MCP stdout is reserved exclusively for JSON-RPC frames.
+    if !args.mcp {
+        let stats = engine.index().stats();
+        if stats.file_count > 0 {
+            println!(
+                "{} project {} ({} files, {} lines indexed).",
+                "astra ▸".blue().bold(),
+                "resumed".green(),
+                stats.file_count,
+                stats.total_lines
+            );
+        } else {
+            println!(
+                "{} New project detected. Run {} to start tracking.",
+                "astra ▸".blue().bold(),
+                "astra --index".bold()
+            );
+        }
     }
 
     // ── Handle Config Subcommand ─────────────────────────────────────

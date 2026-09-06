@@ -46,13 +46,30 @@ pub struct ToolResult {
 pub fn all_tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
+            name: "inspect_project".to_string(),
+            description: "Return a compact project snapshot: top-level structure, manifests, and current git status. Use this as the first inspection for unfamiliar repositories.".to_string(),
+            parameters: vec![],
+        },
+        ToolDef {
             name: "read_file".to_string(),
-            description: "Read the contents of a file at the given path.".to_string(),
-            parameters: vec![ToolParam {
-                name: "path".to_string(),
-                description: "Absolute or relative file path to read.".to_string(),
-                required: true,
-            }],
+            description: "Read a file, optionally restricting output to an inclusive line range.".to_string(),
+            parameters: vec![
+                ToolParam {
+                    name: "path".to_string(),
+                    description: "Absolute or relative file path to read.".to_string(),
+                    required: true,
+                },
+                ToolParam {
+                    name: "start_line".to_string(),
+                    description: "Optional 1-based first line.".to_string(),
+                    required: false,
+                },
+                ToolParam {
+                    name: "end_line".to_string(),
+                    description: "Optional 1-based last line; at most 300 lines are returned.".to_string(),
+                    required: false,
+                },
+            ],
         },
         ToolDef {
             name: "write_file".to_string(),
@@ -219,7 +236,8 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
 
 /// Build a compact text description of available tools for injection into the system prompt.
 pub fn tools_prompt_block() -> String {
-    String::from(r#"## Tools
+    String::from(
+        r#"## Tools
 
 To call tools, respond ONLY with this JSON (no other text):
 {"tool_calls": [{"name": "TOOL", "arguments": {"key": "val"}}]}
@@ -227,7 +245,8 @@ To call tools, respond ONLY with this JSON (no other text):
 Multiple tools allowed per response. When done, reply with plain text (no JSON).
 
 Tools:
-- read_file(path) — Read file contents
+- inspect_project() — Compact structure, manifests, and git status
+- read_file(path, start_line?, end_line?) — Read a file or targeted line range
 - write_file(path, content) — Create/overwrite file (creates dirs)
 - edit_file(path, search, replace) — Search & replace in file
 - list_dir(path) — List directory contents
@@ -243,7 +262,8 @@ Tools:
 - get_hidden_coupling() — See files that frequently change together
 - get_file_timeline(path) — Get a file's history, authors, and staleness
 - get_semantic_concepts() — Learn the codebase's identified patterns, risks, and architectural rules
-"#)
+"#,
+    )
 }
 
 // ── Tool Execution ──────────────────────────────────────────────────────
@@ -257,6 +277,7 @@ pub fn execute_tool(
     searcher: Option<&dyn SearchProvider>,
 ) -> ToolResult {
     let result = match call.name.as_str() {
+        "inspect_project" => exec_inspect_project(project_root),
         "read_file" => exec_read_file(call, project_root),
         "write_file" => exec_write_file(call, project_root, auto_approve),
         "edit_file" => exec_edit_file(call, project_root, auto_approve),
@@ -320,26 +341,30 @@ fn resolve_path(raw: &str, project_root: &Path) -> PathBuf {
     // Also handle Windows Drive Prefix (e.g. C:/ or C:\)
     if clean_raw.len() >= 2 && clean_raw.chars().nth(1) == Some(':') {
         clean_raw = &clean_raw[2..];
-        if let Some(stripped) = clean_raw.strip_prefix('/') { clean_raw = stripped; }
-        if let Some(stripped) = clean_raw.strip_prefix('\\') { clean_raw = stripped; }
+        if let Some(stripped) = clean_raw.strip_prefix('/') {
+            clean_raw = stripped;
+        }
+        if let Some(stripped) = clean_raw.strip_prefix('\\') {
+            clean_raw = stripped;
+        }
     }
-    
+
     let p = PathBuf::from(clean_raw);
     let mut current_resolved = project_root.to_path_buf();
-    
+
     for comp in p.components() {
         match comp {
             std::path::Component::Normal(comp_os) => {
                 let comp_str = comp_os.to_string_lossy().to_string();
                 let next_path = current_resolved.join(&comp_str);
-                
+
                 if next_path.exists() {
                     current_resolved = next_path;
                 } else {
                     // Try fuzzy matching against siblings
                     let mut best_match = None;
                     let mut best_dist = usize::MAX;
-                    
+
                     if let Ok(entries) = std::fs::read_dir(&current_resolved) {
                         for entry in entries.flatten() {
                             if let Ok(name) = entry.file_name().into_string() {
@@ -353,25 +378,25 @@ fn resolve_path(raw: &str, project_root: &Path) -> PathBuf {
                             }
                         }
                     }
-                    
+
                     if let Some(matched) = best_match {
                         current_resolved = current_resolved.join(matched);
                     } else {
                         current_resolved = next_path;
                     }
                 }
-            },
+            }
             std::path::Component::ParentDir => {
                 // Ensure we do not pop beyond project_root
                 if current_resolved.starts_with(project_root) && current_resolved != project_root {
                     current_resolved.pop();
                 }
-            },
-            std::path::Component::CurDir => {},
-            _ => {},
+            }
+            std::path::Component::CurDir => {}
+            _ => {}
         }
     }
-    
+
     current_resolved.canonicalize().unwrap_or(current_resolved)
 }
 
@@ -383,7 +408,15 @@ fn get_str_arg(args: &serde_json::Value, key: &str) -> Result<String> {
 }
 
 fn get_optional_str_arg(args: &serde_json::Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn get_optional_usize_arg(args: &serde_json::Value, key: &str) -> Option<usize> {
+    args.get(key)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 // ── Individual Tool Implementations ─────────────────────────────────────
@@ -398,13 +431,17 @@ fn exec_get_file_owners(call: &ToolCall, project_root: &Path) -> Result<String> 
     let path = get_str_arg(&call.arguments, "path")?;
     let graph = load_graph(project_root)?;
     if let Some(history) = graph.file_timeline(&path) {
-        let mut report = format!("File: {}\nPrimary Owner: {}\nTotal Commits: {}\nAuthors:\n",
+        let mut report = format!(
+            "File: {}\nPrimary Owner: {}\nTotal Commits: {}\nAuthors:\n",
             history.path,
             history.primary_owner.as_deref().unwrap_or("unknown"),
             history.total_changes
         );
         for a in &history.authors {
-            report.push_str(&format!("  - {} ({} commits, {:.1}%)\n", a.name, a.commit_count, a.percentage));
+            report.push_str(&format!(
+                "  - {} ({} commits, {:.1}%)\n",
+                a.name, a.commit_count, a.percentage
+            ));
         }
         Ok(report)
     } else {
@@ -431,7 +468,93 @@ fn exec_get_semantic_concepts(project_root: &Path) -> Result<String> {
     let global_brain = crate::config::get_global_brain_path(project_root);
     let concepts = crate::semantic_memory::ConceptStore::load(&global_brain.join("concepts.json"))
         .map_err(|e| anyhow!("Concepts not available (run :analyze first): {}", e))?;
-    Ok(format!("{}\n\n{}", concepts.concepts_report(), concepts.watches_report()))
+    Ok(format!(
+        "{}\n\n{}",
+        concepts.concepts_report(),
+        concepts.watches_report()
+    ))
+}
+
+fn exec_inspect_project(project_root: &Path) -> Result<String> {
+    let skip = [
+        ".git",
+        ".astra",
+        ".codex",
+        "node_modules",
+        "target",
+        ".next",
+    ];
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(project_root)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if skip.contains(&name.as_str()) {
+            continue;
+        }
+        let suffix = if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            "/"
+        } else {
+            ""
+        };
+        entries.push(format!("{}{}", name, suffix));
+    }
+    entries.sort();
+    entries.truncate(30);
+
+    let manifest_names = [
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "Dockerfile",
+        "docker-compose.yml",
+    ];
+    let manifests = manifest_names
+        .iter()
+        .filter(|name| project_root.join(name).exists())
+        .copied()
+        .collect::<Vec<_>>();
+
+    let git_status = Command::new("git")
+        .args(["status", "--short", "--branch"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|status| !status.is_empty())
+        .map(|status| {
+            let lines = status.lines().collect::<Vec<_>>();
+            let mut compact = lines
+                .iter()
+                .take(40)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if lines.len() > 40 {
+                compact.push_str(&format!("\n... and {} more changes", lines.len() - 40));
+            }
+            compact
+        })
+        .unwrap_or_else(|| "not a git repository or git unavailable".to_string());
+
+    Ok(format!(
+        "Project snapshot\nRoot: {}\nManifests: {}\nTop level (max 30): {}\nGit:\n{}",
+        project_root.display(),
+        if manifests.is_empty() {
+            "none detected".to_string()
+        } else {
+            manifests.join(", ")
+        },
+        if entries.is_empty() {
+            "empty".to_string()
+        } else {
+            entries.join(", ")
+        },
+        git_status
+    ))
 }
 
 fn exec_read_file(call: &ToolCall, project_root: &Path) -> Result<String> {
@@ -443,17 +566,50 @@ fn exec_read_file(call: &ToolCall, project_root: &Path) -> Result<String> {
     }
 
     let content = fs::read_to_string(&path)?;
-    // Truncate very large files to avoid blowing up LLM context
-    if content.len() > 50_000 {
-        let truncated = &content[..50_000];
-        Ok(format!(
-            "{}\n\n... [TRUNCATED — file is {} bytes, showing first 50,000]",
-            truncated,
-            content.len()
-        ))
-    } else {
-        Ok(content)
+    let start_line = get_optional_usize_arg(&call.arguments, "start_line");
+    let end_line = get_optional_usize_arg(&call.arguments, "end_line");
+
+    if start_line.is_some() || end_line.is_some() {
+        let lines = content.lines().collect::<Vec<_>>();
+        let start = start_line.unwrap_or(1).max(1);
+        if start > lines.len().max(1) {
+            return Err(anyhow!(
+                "start_line {} is beyond {} lines in {}",
+                start,
+                lines.len(),
+                path.display()
+            ));
+        }
+        let end = end_line
+            .unwrap_or(start.saturating_add(299))
+            .max(start)
+            .min(start.saturating_add(299))
+            .min(lines.len());
+        let selected = lines[start.saturating_sub(1)..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| format!("{:>5} | {}", start + offset, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(format!(
+            "{} (lines {}-{} of {})\n{}",
+            path.display(),
+            start,
+            end,
+            lines.len(),
+            selected
+        ));
     }
+
+    let char_count = content.chars().count();
+    if char_count > 12_000 {
+        let truncated = content.chars().take(12_000).collect::<String>();
+        return Ok(format!(
+            "{}\n\n... [TRUNCATED — {} characters; use start_line/end_line for targeted reads]",
+            truncated, char_count
+        ));
+    }
+    Ok(content)
 }
 
 fn exec_write_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> Result<String> {
@@ -476,7 +632,11 @@ fn exec_write_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> 
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, &content)?;
-    Ok(format!("✅ Wrote {} bytes to {}", content.len(), path.display()))
+    Ok(format!(
+        "✅ Wrote {} bytes to {}",
+        content.len(),
+        path.display()
+    ))
 }
 
 fn exec_edit_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> Result<String> {
@@ -491,51 +651,55 @@ fn exec_edit_file(call: &ToolCall, project_root: &Path, auto_approve: bool) -> R
 
     let original = fs::read_to_string(&path)?;
     let mut modified = original.clone();
-    
+
     if original.contains(&search) {
         modified = original.replacen(&search, &replace, 1);
     } else {
         // Fallback: Fuzzy whitespace-agnostic line match
-        let search_lines: Vec<&str> = search.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let search_lines: Vec<&str> = search
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
         let orig_lines: Vec<&str> = original.lines().collect();
         let orig_trimmed: Vec<&str> = orig_lines.iter().map(|l| l.trim()).collect();
-        
+
         let mut match_found = false;
         if !search_lines.is_empty() {
-             for i in 0..=orig_trimmed.len().saturating_sub(search_lines.len()) {
-                 let mut matches = true;
-                 let mut s_idx = 0;
-                 let mut j_offset = 0;
-                 
-                 while s_idx < search_lines.len() && (i + j_offset) < orig_trimmed.len() {
-                     if orig_trimmed[i + j_offset].is_empty() {
-                         j_offset += 1;
-                         continue; // skip blank lines in original
-                     }
-                     if search_lines[s_idx] != orig_trimmed[i + j_offset] {
-                         matches = false;
-                         break;
-                     }
-                     s_idx += 1;
-                     j_offset += 1;
-                 }
-                 
-                 if matches && s_idx == search_lines.len() {
-                     let mut new_lines = Vec::new();
-                     new_lines.extend_from_slice(&orig_lines[..i]);
-                     new_lines.push(replace.as_str());
-                     if i + j_offset < orig_lines.len() {
-                         new_lines.extend_from_slice(&orig_lines[(i + j_offset)..]);
-                     }
-                     modified = new_lines.join("\n");
-                     match_found = true;
-                     break;
-                 }
-             }
+            for i in 0..=orig_trimmed.len().saturating_sub(search_lines.len()) {
+                let mut matches = true;
+                let mut s_idx = 0;
+                let mut j_offset = 0;
+
+                while s_idx < search_lines.len() && (i + j_offset) < orig_trimmed.len() {
+                    if orig_trimmed[i + j_offset].is_empty() {
+                        j_offset += 1;
+                        continue; // skip blank lines in original
+                    }
+                    if search_lines[s_idx] != orig_trimmed[i + j_offset] {
+                        matches = false;
+                        break;
+                    }
+                    s_idx += 1;
+                    j_offset += 1;
+                }
+
+                if matches && s_idx == search_lines.len() {
+                    let mut new_lines = Vec::new();
+                    new_lines.extend_from_slice(&orig_lines[..i]);
+                    new_lines.push(replace.as_str());
+                    if i + j_offset < orig_lines.len() {
+                        new_lines.extend_from_slice(&orig_lines[(i + j_offset)..]);
+                    }
+                    modified = new_lines.join("\n");
+                    match_found = true;
+                    break;
+                }
+            }
         }
-        
+
         if !match_found {
-             return Err(anyhow!(
+            return Err(anyhow!(
                  "Search string not found in {}. Exact and whitespace-agnostic matching both failed.",
                  path.display()
              ));
@@ -571,8 +735,15 @@ fn exec_list_dir(call: &ToolCall, project_root: &Path) -> Result<String> {
 
     let mut entries = Vec::new();
     let skip = [
-        "node_modules", "target", ".git", "__pycache__", ".venv", "venv",
-        "dist", "build", ".next",
+        "node_modules",
+        "target",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".next",
     ];
 
     for entry in fs::read_dir(&path)? {
@@ -663,8 +834,17 @@ fn exec_search_codebase(call: &ToolCall, project_root: &Path) -> Result<String> 
     let mut matches = Vec::new();
     let mut stack = vec![project_root.to_path_buf()];
     let skip = [
-        "node_modules", "target", ".git", "__pycache__", ".venv", "venv",
-        "dist", "build", ".next", ".astra", ".codex",
+        "node_modules",
+        "target",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".next",
+        ".astra",
+        ".codex",
     ];
 
     while let Some(dir) = stack.pop() {
@@ -690,12 +870,7 @@ fn exec_search_codebase(call: &ToolCall, project_root: &Path) -> Result<String> 
                     for (i, line) in content.lines().enumerate() {
                         if line.to_lowercase().contains(&pattern_lower) {
                             let rel = path.strip_prefix(project_root).unwrap_or(&path);
-                            matches.push(format!(
-                                "{}:{}: {}",
-                                rel.display(),
-                                i + 1,
-                                line.trim()
-                            ));
+                            matches.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
                             if matches.len() >= 50 {
                                 break;
                             }
@@ -773,7 +948,10 @@ fn exec_delete_dir(call: &ToolCall, project_root: &Path, auto_approve: bool) -> 
     }
 
     if !auto_approve {
-        eprintln!("  ⚠️  Agent wants to DELETE directory and all contents: {}", path.display());
+        eprintln!(
+            "  ⚠️  Agent wants to DELETE directory and all contents: {}",
+            path.display()
+        );
         eprint!("     Allow? [y/n]: ");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -797,7 +975,11 @@ fn exec_move_path(call: &ToolCall, project_root: &Path, auto_approve: bool) -> R
     }
 
     if !auto_approve {
-        eprintln!("  ⚠️  Agent wants to move/rename: {} -> {}", src.display(), dst.display());
+        eprintln!(
+            "  ⚠️  Agent wants to move/rename: {} -> {}",
+            src.display(),
+            dst.display()
+        );
         eprint!("     Allow? [y/n]: ");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -825,5 +1007,57 @@ fn exec_research_web(call: &ToolCall, searcher: Option<&dyn SearchProvider>) -> 
         Ok(format!("🌐 Search results for '{}':\n{}", query, results))
     } else {
         Err(anyhow!("Web search is not configured or available."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exec_inspect_project, exec_read_file, ToolCall};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("astra_tools_test_{unique}"));
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    #[test]
+    fn project_snapshot_is_compact_and_detects_manifests() {
+        let root = temp_root();
+        fs::write(root.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        let snapshot = exec_inspect_project(&root).unwrap();
+
+        assert!(snapshot.contains("Cargo.toml"));
+        assert!(snapshot.contains("src/"));
+        assert!(snapshot.len() < 4_000);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_file_supports_targeted_line_ranges() {
+        let root = temp_root();
+        fs::write(root.join("sample.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        let call = ToolCall {
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({
+                "path": "sample.txt",
+                "start_line": 2,
+                "end_line": 3
+            }),
+        };
+
+        let output = exec_read_file(&call, &root).unwrap();
+
+        assert!(output.contains("2 | two"));
+        assert!(output.contains("3 | three"));
+        assert!(!output.contains("4 | four"));
+        let _ = fs::remove_dir_all(root);
     }
 }

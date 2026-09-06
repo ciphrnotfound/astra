@@ -56,6 +56,12 @@ pub struct TavilySearch {
     api_key: String,
 }
 
+/// Groq's low-latency production default.  Groq retired the old
+/// `llama-3.1-8b-instant` id in August 2026, so keep the default in one place
+/// and retain a compatibility fallback for existing persona/config files.
+pub const DEFAULT_GROQ_MODEL: &str = "openai/gpt-oss-20b";
+const GROQ_COMPATIBILITY_FALLBACKS: &[&str] = &["openai/gpt-oss-120b", "qwen/qwen3.6-27b"];
+
 static GROQ_LAST_REQUEST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 impl TavilySearch {
@@ -139,7 +145,7 @@ impl GroqModel {
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_else(|_| Client::new());
-        let model = model.unwrap_or_else(|| "llama-3.1-8b-instant".to_string());
+        let model = model.unwrap_or_else(|| DEFAULT_GROQ_MODEL.to_string());
         let endpoint = "https://api.groq.com/openai/v1/chat/completions".to_string();
         Ok(Self {
             client,
@@ -203,6 +209,20 @@ impl GroqModel {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(Duration::from_secs)
+    }
+
+    fn model_candidates(&self) -> Vec<String> {
+        let mut candidates = vec![self.model.clone()];
+        // Keep user overrides first, but do not let a stale, misspelled, or
+        // account-inaccessible model take down the whole request.  Groq
+        // returns a 404 for all three cases, so current production models are
+        // safe fallbacks for old persona/config values as well as overrides.
+        if self.model != DEFAULT_GROQ_MODEL {
+            candidates.push(DEFAULT_GROQ_MODEL.to_string());
+        }
+        candidates.extend(GROQ_COMPATIBILITY_FALLBACKS.iter().map(|m| (*m).to_string()));
+        candidates.dedup();
+        candidates
     }
 }
 
@@ -437,60 +457,75 @@ impl CodexModel for GroqModel {
     }
 
     fn complete_chat(&self, system: &str, user: &str) -> Result<String> {
-        let body = GroqChatRequest {
-            model: self.model.clone(),
-            messages: vec![
-                GroqMessage {
-                    role: "system".to_string(),
-                    content: system.to_string(),
-                },
-                GroqMessage {
-                    role: "user".to_string(),
-                    content: user.to_string(),
-                },
-            ],
-            temperature: 0.1,
-        };
+        let candidates = self.model_candidates();
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            let body = GroqChatRequest {
+                model: candidate.clone(),
+                messages: vec![
+                    GroqMessage {
+                        role: "system".to_string(),
+                        content: system.to_string(),
+                    },
+                    GroqMessage {
+                        role: "user".to_string(),
+                        content: user.to_string(),
+                    },
+                ],
+                temperature: 0.1,
+            };
 
-        let mut delay = Duration::from_secs(3);
-        let mut attempts = 0;
-        let max_attempts = 3;
+            let mut delay = Duration::from_secs(3);
+            let mut attempts = 0;
+            let max_attempts = 3;
 
-        loop {
-            self.wait_for_request_slot();
-            let response = self
-                .client
-                .post(&self.endpoint)
-                .headers(self.headers())
-                .json(&body)
-                .send()?;
+            loop {
+                self.wait_for_request_slot();
+                let response = self
+                    .client
+                    .post(&self.endpoint)
+                    .headers(self.headers())
+                    .json(&body)
+                    .send()?;
 
-            let status = response.status();
-            
-            if status.is_success() {
-                let parsed: GroqChatResponse = response.json()?;
-                return parsed
-                    .choices
-                    .first()
-                    .map(|c| c.message.content.clone())
-                    .ok_or_else(|| anyhow!("Groq API returned no choices"));
+                let status = response.status();
+
+                if status.is_success() {
+                    let parsed: GroqChatResponse = response.json()?;
+                    return parsed
+                        .choices
+                        .first()
+                        .map(|c| c.message.content.clone())
+                        .ok_or_else(|| anyhow!("Groq API returned no choices"));
+                }
+
+                if status.as_u16() == 429 && attempts < max_attempts {
+                    attempts += 1;
+                    let retry_delay = Self::retry_after_delay(&response).unwrap_or(delay);
+                    eprintln!(
+                        "  ⚠ Rate limited (429). Retrying in {:?} (attempt {}/{})",
+                        retry_delay, attempts, max_attempts
+                    );
+                    thread::sleep(retry_delay);
+                    delay *= 2;
+                    continue;
+                }
+
+                let err_text = response.text().unwrap_or_default();
+                let model_missing = status.as_u16() == 404
+                    && (err_text.contains("model_not_found") || err_text.contains("does not exist"));
+                if model_missing && candidate_index + 1 < candidates.len() {
+                    eprintln!(
+                        "  ⚠ Groq model '{}' is unavailable; trying '{}'.",
+                        candidate,
+                        candidates[candidate_index + 1]
+                    );
+                    break;
+                }
+                return Err(anyhow!("Groq API error: {} - {}", status, err_text));
             }
-
-            if status.as_u16() == 429 && attempts < max_attempts {
-                attempts += 1;
-                let retry_delay = Self::retry_after_delay(&response).unwrap_or(delay);
-                eprintln!(
-                    "  ⚠ Rate limited (429). Retrying in {:?} (attempt {}/{})",
-                    retry_delay, attempts, max_attempts
-                );
-                thread::sleep(retry_delay);
-                delay *= 2;
-                continue;
-            }
-
-            let err_text = response.text().unwrap_or_default();
-            return Err(anyhow!("Groq API error: {} - {}", status, err_text));
         }
+
+        Err(anyhow!("Groq API could not find an available model. Set --groq-model to a model enabled for your account."))
     }
 }
 

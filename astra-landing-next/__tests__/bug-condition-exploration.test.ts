@@ -1,22 +1,20 @@
 /**
- * Bug Condition Exploration Test for Property 1: Module Resolution Failure
+ * Regression test for the module-resolution failures that previously blocked
+ * production builds.
  * 
  * **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6**
  * 
- * This test MUST FAIL on unfixed code - failure confirms the bug exists.
- * 
- * The test verifies that TypeScript compilation fails for files importing:
- * - Missing functions from '@/lib/db/queries': getUser, getTeamForUser, getUserWithTeam, 
+ * The test verifies that module resolution succeeds for files importing:
+ * - Functions from '@/lib/db/queries': getUser, getTeamForUser, getUserWithTeam,
  *   getTeamByStripeCustomerId, updateTeamSubscription
  * - Button component from '@/components/ui/button' (incorrect export type)
  * 
- * EXPECTED OUTCOME: Test FAILS (this is correct - it proves the bug exists)
- * 
- * When this test fails, it will document the exact TypeScript errors that prevent
- * the Vercel build from succeeding.
+ * The suite passes only when every public import remains available.
  */
 
-// Test Case 1: Verify getUser, getTeamByStripeCustomerId, updateTeamSubscription imports fail
+import { describe, expect, it } from 'vitest';
+
+// Test Case 1: Verify getUser, getTeamByStripeCustomerId, updateTeamSubscription imports resolve
 // This simulates what happens in lib/payments/stripe.ts
 import {
   getUser as getUserFromStripe,
@@ -101,6 +99,12 @@ export async function testBugCondition() {
     message: 'All imports resolved successfully - bug appears to be fixed'
   };
 }
+
+describe('module resolution regression', () => {
+  it('keeps the authentication, team, subscription, and Button exports available', async () => {
+    await expect(testBugCondition()).resolves.toMatchObject({ success: true });
+  });
+});
 
 /**
  * Expected TypeScript Errors (on unfixed code):

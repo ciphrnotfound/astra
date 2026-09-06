@@ -1,17 +1,14 @@
 import { createServerClient as createSupabaseServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-  throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL');
-}
-
-if (!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-  throw new Error('Missing NEXT_PUBLIC_SUPABASE_ANON_KEY');
-}
-
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY');
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing ${name}`);
+  }
+  return value;
 }
 
 // Server-side client for authenticated requests (uses cookies)
@@ -19,8 +16,8 @@ export async function createServerClient() {
   const cookieStore = await cookies();
 
   return createSupabaseServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    requiredEnv('NEXT_PUBLIC_SUPABASE_URL'),
+    requiredEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY'),
     {
       cookies: {
         get(name: string) {
@@ -45,19 +42,27 @@ export async function createServerClient() {
   );
 }
 
-// Server-side client with service role key for admin operations
-export const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
+let adminClient: SupabaseClient<any> | undefined;
+
+// Create the privileged client only when an admin query is actually made. This
+// keeps module imports safe in tests and build tooling while still failing fast
+// at the operation boundary when configuration is genuinely required.
+function getAdminClient() {
+  adminClient ??= createClient<any>(
+    requiredEnv('NEXT_PUBLIC_SUPABASE_URL'),
+    requiredEnv('SUPABASE_SERVICE_ROLE_KEY'),
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    }
+  );
+
+  return adminClient;
+}
 
 // Database helpers using Supabase admin client
 export const db = {
-  from: (table: string) => supabaseAdmin.from(table),
+  from: (table: string) => getAdminClient().from(table),
 };

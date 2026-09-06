@@ -452,6 +452,85 @@ impl TemporalGraph {
         out
     }
 
+    /// Explain ownership for a natural-language scope using the Git graph.
+    /// This keeps the evidence close to the answer: matching paths, author
+    /// contribution, and the commit messages that caused the attribution.
+    pub fn ownership_report_for(&self, query: &str) -> Option<String> {
+        let query_lower = query.to_ascii_lowercase();
+        let mut terms = query_lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|term| term.len() > 2)
+            .filter(|term| !matches!(*term, "who" | "owns" | "the" | "page" | "files"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return None;
+        }
+
+        let mut matches = self
+            .file_histories
+            .values()
+            .filter_map(|history| {
+                let path = history.path.to_ascii_lowercase().replace('\\', "/");
+                let commit_text = history
+                    .commits
+                    .iter()
+                    .map(|commit| commit.summary.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let score = terms.iter().fold(0usize, |score, term| {
+                    score
+                        + if path.contains(term) { 10 } else { 0 }
+                        + if commit_text.contains(term) { 2 } else { 0 }
+                });
+                (score > 0).then_some((score, history))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| right.total_changes.cmp(&left.total_changes))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        if matches.is_empty() {
+            return None;
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(&mut out, "📊 Git-backed ownership for `{}`", query.trim());
+        let _ = writeln!(&mut out, "Evidence: file history, author contribution, and commit messages.");
+        for (_, history) in matches.into_iter().take(8) {
+            let owner = history.primary_owner.as_deref().unwrap_or("unknown");
+            let _ = writeln!(
+                &mut out,
+                "\n- {} — primary owner: {} ({} commits; last touched {}d ago)",
+                history.path, owner, history.total_changes, history.staleness_days
+            );
+            let contributors = history
+                .authors
+                .iter()
+                .take(3)
+                .map(|author| format!("{} {:.0}%", author.name, author.percentage))
+                .collect::<Vec<_>>();
+            if !contributors.is_empty() {
+                let _ = writeln!(&mut out, "  Contributors: {}", contributors.join(", "));
+            }
+            for commit in history.commits.iter().rev().take(3) {
+                let date = chrono::DateTime::from_timestamp(commit.timestamp, 0)
+                    .map(|date| date.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let _ = writeln!(
+                    &mut out,
+                    "  Commit {} ({}) — {} (by {})",
+                    commit.id, date, commit.summary, commit.author
+                );
+            }
+        }
+        Some(out)
+    }
+
     pub fn project_history_report(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(&mut out, "📚 Project History Report");
@@ -748,5 +827,46 @@ impl TemporalGraph {
         let data = std::fs::read_to_string(path)?;
         let graph: Self = serde_json::from_str(&data)?;
         Ok(graph)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthorContribution, CommitNode, FileHistory, TemporalGraph};
+
+    #[test]
+    fn focused_ownership_report_includes_git_commit_evidence() {
+        let mut graph = TemporalGraph::new();
+        graph.file_histories.insert(
+            "astra-landing-next/app/page.tsx".to_string(),
+            FileHistory {
+                path: "astra-landing-next/app/page.tsx".to_string(),
+                commits: vec![CommitNode {
+                    id: "abc12345".to_string(),
+                    summary: "Build Next.js landing page hero".to_string(),
+                    author: "Jeremy".to_string(),
+                    timestamp: 1_700_000_000,
+                    files_changed: vec!["astra-landing-next/app/page.tsx".to_string()],
+                }],
+                authors: vec![AuthorContribution {
+                    name: "Jeremy".to_string(),
+                    commit_count: 1,
+                    percentage: 100.0,
+                    first_commit: 1_700_000_000,
+                    last_commit: 1_700_000_000,
+                }],
+                primary_owner: Some("Jeremy".to_string()),
+                last_touched: 1_700_000_000,
+                staleness_days: 0,
+                total_changes: 1,
+            },
+        );
+
+        let report = graph
+            .ownership_report_for("the next js landing page")
+            .expect("query should match the landing page history");
+        assert!(report.contains("Jeremy"));
+        assert!(report.contains("Build Next.js landing page hero"));
+        assert!(report.contains("abc12345"));
     }
 }

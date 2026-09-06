@@ -5,16 +5,42 @@ import { createServerClient } from './server';
 import { redirect } from 'next/navigation';
 import type { User } from '@supabase/supabase-js';
 
+function isNextDynamicServerUsage(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'digest' in error &&
+    (error as { digest?: unknown }).digest === 'DYNAMIC_SERVER_USAGE'
+  );
+}
+
 /**
  * Require authentication for a route
  * Redirects to sign-in page if user is not authenticated
  * Returns the authenticated user if successful
  */
 export async function requireAuth(): Promise<User> {
-  const supabase = await createServerClient();
-  
-  const { data: { session }, error } = await supabase.auth.getSession();
-  
+  let session: { user: User } | null = null;
+  let error: unknown = null;
+
+  try {
+    const supabase = await createServerClient();
+    const result = await supabase.auth.getSession();
+    session = result.data.session;
+    error = result.error;
+  } catch (cause) {
+    // Next uses this sentinel during static analysis of cookie-based routes;
+    // swallowing it would make the route appear static and hide real bugs.
+    if (isNextDynamicServerUsage(cause)) {
+      throw cause;
+    }
+    // Missing/invalid deployment configuration must not turn a protected
+    // route into a server error.  Redirect to the public auth surface and log
+    // the actionable cause for operators.
+    console.error('Auth configuration unavailable:', cause);
+    redirect('/signin?error=auth_unavailable');
+  }
+
   if (error || !session) {
     redirect('/signin');
   }
@@ -27,11 +53,17 @@ export async function requireAuth(): Promise<User> {
  * Does not redirect - useful for optional authentication
  */
 export async function getCurrentUser(): Promise<User | null> {
-  const supabase = await createServerClient();
-  
-  const { data: { session } } = await supabase.auth.getSession();
-  
-  return session?.user || null;
+  try {
+    const supabase = await createServerClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.user || null;
+  } catch (cause) {
+    if (isNextDynamicServerUsage(cause)) {
+      throw cause;
+    }
+    console.error('Unable to read the current auth session:', cause);
+    return null;
+  }
 }
 
 /**
